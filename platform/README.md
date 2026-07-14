@@ -6,9 +6,11 @@ runtime, and endpoint SBOMs, and maintains vulnerability status for package
 versions.
 
 The UI is a React + TypeScript app in `frontend/`. The API is a FastAPI service
-(uvicorn); all business logic lives in a single reusable `Store` class (`app.py`),
-`server.py` is the HTTP layer (`create_app(store)`), and `run.py` is the uvicorn
-launcher. The datastore is **MySQL** via `SUPPLYDRIFT_DATABASE_URL` (the
+(uvicorn); the reusable `Store` class (`app.py`) owns core persistence,
+ingestion, and query logic. `auth.py`/`authz.py` implement authentication and
+RBAC, `server.py` owns the HTTP plus scheduler/policy plumbing
+(`create_app(store)`), and `run.py` is the uvicorn launcher. The datastore is
+**MySQL** via `SUPPLYDRIFT_DATABASE_URL` (the
 docker-compose default) **or a SQLite file** (single-node/dev fallback when the
 URL is unset) — the `Store` abstraction keeps the HTTP layer engine-agnostic.
 
@@ -34,10 +36,19 @@ the runner token automatically (zero-touch — see Authentication below). Set
 `SUPPLYDRIFT_SLACK_WEBHOOK` on the platform service to push malware alerts to
 Slack.
 
+Compose pins Nono and sets `SUPPLYDRIFT_TOOL_SANDBOX=required` for the image and
+GitHub runners, so they fail before polling if the per-invocation Syft/Grype
+sandbox is unavailable. That boundary covers untrusted parser child processes;
+trusted parent-side connector, `kubectl`, and AWS discovery code remains outside
+it and relies on the hardened container plus deployment egress policy. See the
+[security boundary](../SECURITY.md#understand-the-sandbox-boundary),
+[sandbox runtime](../supplydrift-sandbox/README.md), and
+[architecture](../docs/architecture.md#per-invocation-parser-sandbox).
+
 ### Run locally without Docker
 
-Prerequisites: Python 3.12+, and Node.js 20+ (only needed to build the UI). This
-path uses the SQLite fallback datastore (a file under `data/`).
+Prerequisites: Python 3.12+, and Node.js `^20.19.0` or `>=22.12.0` (only needed to
+build the UI). This path uses the SQLite fallback datastore (a file under `data/`).
 
 > **You must build the frontend once.** The backend serves the compiled UI from
 > `frontend/dist`, which is a build artifact and is **not committed** (it's
@@ -51,6 +62,7 @@ path uses the SQLite fallback datastore (a file under `data/`).
    cd platform/frontend
    npm ci
    npm run build
+   cd ../..
    ```
 
 2. Start the backend — serves the API **and** the built UI on one port:
@@ -58,20 +70,41 @@ path uses the SQLite fallback datastore (a file under `data/`).
    ```bash
    cd platform
    pip install -r requirements.txt
-   python3 run.py --load-demo            # --host/--port/--db; --reload for dev
-   # or directly: SUPPLYDRIFT_DB=data/supplydrift.db uvicorn server:api --port 8765
+   SUPPLYDRIFT_AUTH=disabled python3 run.py --load-demo
+   # Options: --host/--port/--db; --reload for development
    ```
+
+   That command is the simplest **loopback-only development** start. To exercise
+   authentication locally instead, seed the first admin and allow the session
+   cookie over plain HTTP:
+
+   ```bash
+   SUPPLYDRIFT_ADMIN_USER=admin \
+   SUPPLYDRIFT_ADMIN_PASSWORD='choose-a-password-of-at-least-8-characters' \
+   SUPPLYDRIFT_INSECURE=1 \
+   python3 run.py --load-demo
+   ```
+
+   `SUPPLYDRIFT_ADMIN_*` is used only while the database has no users. Set
+   `SUPPLYDRIFT_SECRET_KEY` as well before saving connector credentials.
 
 3. Open <http://127.0.0.1:8765>.
 
 > This runs the **platform only** — no scan runners. The UI's **Scan** button will
 > queue a job and show *"Queued — no runner connected"* until a runner is polling.
-> To actually execute scans, start a runner against the platform:
+> To actually execute scans, start a runner from the **repository root in another
+> shell** against the platform:
 >
 > ```bash
 > python3 image-scanner/image_scan.py --serve \
 >   --config-url http://127.0.0.1:8765/api/scanner/config --log-format json
 > ```
+>
+> The command above works with the auth-disabled development start. With auth
+> enabled, create a `runner` token under **Access → API tokens** and add
+> `SUPPLYDRIFT_RUNNER_TOKEN=sdp_...` to the runner process. Install the image
+> scanner's Python requirements and Syft/Grype first, or use the Compose runner
+> image, which includes its scanner tools and sandbox configuration.
 
 ### Frontend dev server (hot reload)
 
@@ -97,7 +130,7 @@ All platform behavior is controlled by environment variables:
 | `SUPPLYDRIFT_SECRET_KEY` | *(unset)* | Fernet key that encrypts connector credentials at rest. **Required to store source credentials.** Generator one-liner in `.env.example`. |
 | `SUPPLYDRIFT_RUNNER_TOKEN` | *(unset)* | Explicit `runner`-scope token for external runners (overrides the token file). |
 | `SUPPLYDRIFT_RUNNER_TOKEN_FILE` | `/run/supplydrift/runner.token` | Zero-touch runner token file, generated on first boot and shared over the compose volume. |
-| `SUPPLYDRIFT_PUBLIC_URL` | `http://localhost:8765` | Public URL used for CORS origins and Slack alert links. |
+| `SUPPLYDRIFT_PUBLIC_URL` | `http://127.0.0.1:8765` *(Compose sets `http://localhost:8765`)* | URL returned in scanner configuration and used for CORS. Set it explicitly outside Compose. |
 | `SUPPLYDRIFT_SLACK_WEBHOOK` | *(unset)* | Default env var read for malware Slack alerts (settings store the env-var *name*, never the value). |
 | `SUPPLYDRIFT_MAX_BODY_MB` | `64` | Request-body size cap for ingest/sync. |
 | `SUPPLYDRIFT_MAX_DECOMPRESSED_MB` | `256` | Cap on gzip-decompressed request size (zip-bomb guard). |
@@ -108,6 +141,13 @@ All platform behavior is controlled by environment variables:
 | `SUPPLYDRIFT_DEMO` | *(unset)* | Enables the destructive `/api/demo/reset` + `/api/demo/load` routes (404 otherwise). |
 | `SUPPLYDRIFT_LOAD_DEMO` | *(unset)* | Load demo data at boot (what `run.py --load-demo` sets). |
 | `MALWARE_SCHEDULER` | *(on)* | `off` disables the interval-based malware-job enqueue scheduler. |
+
+**Login cooldown:** five failed attempts for the same normalized username within
+a fixed five-minute window cause subsequent attempts to return `429` until that
+window expires. The per-IP threshold above uses the same five-minute window; set
+it to `0` to disable only the IP limit. A successful login clears the username
+counter but intentionally does not clear the IP counter. Counters are stored in
+the database, so restarting the API does not reset the cooldown.
 
 ## Authentication
 
@@ -121,15 +161,19 @@ Auth is **on by default**. There are two planes:
   `runner` tokens can fetch scanner credentials and require an admin.
 
   ```bash
-  curl -H "Authorization: Bearer sdp_..." http://localhost:8765/api/summary
+  curl -H "Authorization: Bearer $READONLY_TOKEN" http://localhost:8765/api/summary
   ```
 
 **First run:** set `SUPPLYDRIFT_ADMIN_USER` / `SUPPLYDRIFT_ADMIN_PASSWORD` in `.env`
 (see `.env.example`). They seed the initial admin **once, on an empty database**, and
 are **ignored on every later boot** (the check is "no users exist yet"). After you've
-logged in you can safely **remove the password from `.env`** — the account lives in the
-DB and you change it from the UI. If auth is on and these are unset with no users, the
-API logs an error and returns `401` for everything until you set them and restart.
+logged in, the platform itself no longer needs the seed password — the account lives
+in the DB and you change it from the UI. However, `scripts/local-compose.sh doctor`
+and `up` deliberately require a non-empty admin password on every preflight, so keep
+it in the mode-600 `.env` while using that helper, or start the already-seeded
+platform directly after removing it. If auth is on and these are unset with no users,
+the API logs an error and protected API calls return `401` until you set them and
+restart.
 
 **Runners need no setup in compose:** the platform generates a `runner` token on
 first boot and shares it over an internal volume that the runners mount read-only —
@@ -149,19 +193,22 @@ Motion); data-heavy lists are server-paginated.
 
 - `Dashboard`: asset **scan status** (identified vs scanned vs pending) / asset /
   package / vulnerability posture.
-- `Asset Inventory`: every asset (repo, image, k8s/ECS workload, endpoint),
+- `Asset Inventory`: every asset (repo, image, Kubernetes workload, endpoint, and
+  externally ingested ECS/cloud workload),
   filterable by type and **scan status**, with a per-asset scan badge. The detail
-  view has **paginated** Components (with per-component finding counts) and
-  Findings (each showing the affected package + recommended upgrade), plus
-  relationships and **provenance** for images.
+  view has **paginated** Components, Vulnerabilities, and non-CVE Findings tabs,
+  plus relationships and **provenance** for images. The bundled scanner emits workload
+  topology for Kubernetes/EKS; its ECS connector currently discovers running
+  image targets and provenance metadata, not ECS workload assets or topology.
 - `Endpoints`: developer-laptop assets with OS / employee / department metadata.
 - `SBOM Analyzer`: package search → version drill-down → affected targets (paginated).
 - `Vulnerabilities`: the single security view — **CVE findings** synced from the
   scanners (syft → grype), each with the affected package, severity, and the
-  **recommended upgrade** (`fix_recommendation`). No accept/dismiss; no external
-  OSV check (vulnerabilities come straight from the scan payload).
+  recommended upgrade (`fix_recommendation`) **when the scanner supplies a fixed
+  version**. No accept/dismiss; no external OSV check (vulnerabilities come
+  straight from the scan payload).
 - `Malware Analysis`: two panes — **Alerts** (OSV `MAL-*` advisories matched against
-  the inventory: package, advisory link, affected assets, NEW/UPDATE) and
+  the inventory: package, advisory link, affected assets, NEW badge, active status) and
   **Configuration** (master enable toggle, interval, platform alerts on-by-default,
   optional Slack). A **Run analysis** button enqueues a job for the `malware-runner`.
   A red banner surfaces on the dashboard when alerts are active. Architecture:
@@ -180,14 +227,15 @@ Scanners push to one sync endpoint per source type:
 POST /api/sync/repositories
 POST /api/sync/container-images        # accepts image provenance metadata
 POST /api/sync/kubernetes-workloads
-POST /api/sync/ecs-workloads
+POST /api/sync/ecs-workloads           # normalized workload data from external producers
 POST /api/sync/endpoints               # developer laptops / devices
 ```
 
 Aliases are available (e.g. `registry`, `images`, `k8s-workloads`, `laptops`).
 Each endpoint accepts source-scoped CycloneDX or normalized payloads.
 
-Read APIs back the UI and are available to any authenticated principal:
+Read APIs back the UI and require a human role with `read` or a `readonly` bearer
+token (`runner` and `ingest` tokens intentionally do not have general read access):
 
 ```text
 GET /api/summary
@@ -201,8 +249,9 @@ GET /api/sbom/versions?name=openssl&ecosystem=deb&limit=50
 GET /api/sbom/assets?name=openssl&ecosystem=deb&version=1.1.1f-1ubuntu2.18&limit=50
 ```
 
-`GET /api/graph` (asset/component graph) and `GET /api/blast-radius` (component →
-affected assets) exist as **APIs only** — there is no UI graph view yet.
+`GET /api/graph` (asset nodes connected by `asset_relationships`) and
+`GET /api/blast-radius` (one component → affected assets + findings) exist as
+**APIs only** — there is no UI graph view yet.
 
 Payload shapes, the source-configuration API (`/api/connectors`,
 `/api/scanner/config`), the scan queue, the malware API, and the pagination
@@ -212,7 +261,10 @@ contract are all specified in [connector_contract.md](connector_contract.md).
 
 - [`scripts/diag_endpoint_sync.py`](scripts/diag_endpoint_sync.py) — explains
   package-count gaps between a local endpoint scan and what the platform stored
-  (purl-identity dedup vs. raw Syft artifact count). Advisory only; not part of
-  the normal flow.
+  (normalized component-identity dedup vs. raw Syft artifact count). Advisory only;
+  not part of the normal flow.
 - [`scripts/run_malware_analysis.py`](scripts/run_malware_analysis.py) — manual
-  runner for OSV malware analysis (see [`docs/malware-analysis.md`](docs/malware-analysis.md)).
+  local-dev helper for OSV malware analysis. Its complete workflow currently
+  requires `SUPPLYDRIFT_AUTH=disabled`; for an auth-enabled deployment use the
+  bundled malware runner with a `runner` token (see
+  [`docs/malware-analysis.md`](docs/malware-analysis.md)).

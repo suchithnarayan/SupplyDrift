@@ -130,8 +130,9 @@ need credentials.
 | Public images | `hariprasadpo75/sample:updated` |
 | Credentials | Leave blank |
 
-Click **Scan**. A successful run creates a container-image asset with Syft
-components and Grype findings.
+Click **Scan**. A successful run creates a container-image asset and, when Syft
+finds packages, component records. Grype findings are data- and database-dependent;
+zero CVEs can still be a successful scan.
 
 ### GitHub
 
@@ -240,8 +241,10 @@ heartbeat instead of repeating the complete scan. Keep the state directory to
 preserve both this behavior and the endpoint identity.
 
 Verify the result in **Endpoints**, then open the asset's **Components** and
-**Findings** tabs. The same CVEs appear in the global **Vulnerabilities** view,
-and endpoint packages are searchable in **SBOM Analyzer**.
+**Vulnerabilities** tabs. Non-CVE endpoint findings, when present, use the
+separate **Findings** tab. The same CVEs appear in the global
+**Vulnerabilities** view, and endpoint packages are searchable in
+**SBOM Analyzer**.
 
 ## 6. Malware Analysis
 
@@ -268,13 +271,31 @@ Use `Ctrl+C` to stop following logs; the containers continue running.
 
 An end-to-end local run should show:
 
-- source cards ending in `succeeded`
+- source cards with a green successful-run summary such as scanned, component,
+  and vulnerability counts
 - repository, image, Kubernetes, and endpoint assets
 - nonzero component counts on scanned assets
-- Grype CVE findings and available fix recommendations
-- Kubernetes cluster-to-workload and workload-to-image graph edges
+- Grype CVE findings and fix recommendations when the selected targets and
+  current database produce them; zero CVEs is valid
+- Kubernetes topology in `GET /api/graph`: workload-to-cluster `belongs_to`
+  edges and image-to-workload `runs_in` edges
 - no queued or dropped endpoint batches
 - no unexpected traceback or error-level runner logs
+
+There is not currently a graph page in the UI. To inspect the topology API,
+create a temporary `readonly` token under **Access -> API tokens**, then run:
+
+```bash
+read -rsp "Readonly token: " SUPPLYDRIFT_READ_TOKEN; printf '\n'
+curl -fsS -H "Authorization: Bearer $SUPPLYDRIFT_READ_TOKEN" \
+  http://127.0.0.1:8765/api/graph \
+  | jq '{nodes: (.nodes | length), edges: (.edges | length)}'
+unset SUPPLYDRIFT_READ_TOKEN
+```
+
+Return to **Access -> API tokens** and revoke this temporary token when finished.
+`unset` only removes the shell copy; API tokens have no automatic expiry and
+remain valid until explicitly revoked.
 
 Vulnerability totals are expected to change as images, repositories, and the
 Grype database change. Validate behavior and nonzero inventory rather than
@@ -322,6 +343,14 @@ The first administrator is seeded only on an empty database. Use the password
 stored in the existing account, reset it through an administrator, or perform an
 intentional volume reset.
 
+### Login returns `too many attempts`
+
+Five failed attempts for one username within a five-minute DB-backed window
+temporarily throttle that username. Wait until five minutes after the first
+failure in the current window, then retry with the correct password. A successful
+login clears that username's failure record. The platform also applies a
+separate, higher per-source-IP failure threshold.
+
 ### Endpoint upload returns 401 or 403
 
 Confirm `ENDPOINT_SCANNER_TOKEN` contains an active `ingest` token, appears only
@@ -352,7 +381,7 @@ Check that the appropriate runner is running and polling:
 
 ```bash
 ./scripts/local-compose.sh status
-./scripts/local-compose.sh logs image-runner github-runner
+./scripts/local-compose.sh logs image-runner github-runner malware-runner
 ```
 
 Registry and Kubernetes jobs use `image-runner`; repository jobs use
@@ -363,8 +392,10 @@ Registry and Kubernetes jobs use `image-runner`; repository jobs use
 - Never commit `.env`, API tokens, connector credentials, or endpoint state.
 - Keep authentication enabled, even for local testing.
 - The local platform binds to `127.0.0.1` by default.
-- `SBOM_ALLOW_INSECURE=true` is used by the helper only because the endpoint and
-  platform communicate over localhost HTTP. Use HTTPS for remote endpoints.
+- The helper always sets `SBOM_ALLOW_INSECURE=true` for its host-side endpoint
+  command because its supported workflow uses the default localhost HTTP URL.
+  Keep `SUPPLYDRIFT_URL` local when using that command. For a remote platform,
+  run the collector directly against HTTPS and leave insecure HTTP disabled.
 - Public GitHub and DockerHub examples require no credentials.
 - Image and repository runners require a pinned per-target Syft/Grype sandbox,
   use read-only root filesystems, and keep writable job state on ephemeral
@@ -374,7 +405,8 @@ Registry and Kubernetes jobs use `image-runner`; repository jobs use
 - Parent-side Git, kubectl, and AWS CLI caches also live under that ephemeral
   `/tmp` home; kubeconfig and optional AWS credential files remain on their
   explicit read-only mounts.
-- Revoke temporary endpoint tokens after testing when they are no longer needed.
+- Revoke temporary endpoint and readonly tokens after testing when they are no
+  longer needed.
 
 For production endpoint scheduling, queue controls, full-filesystem scans, and
 fleet rollout guidance, see

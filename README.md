@@ -23,20 +23,23 @@ reports the gap against the declared-dependency view.
 
 | Path | What it answers | Stack |
 | --- | --- | --- |
-| [`platform/`](platform/) | The product surface: one searchable inventory across every source, CVE and malware (OSV `MAL-*`) views, a dependency graph API, UI-driven scans (job queue + polling runners), and authentication | React UI + FastAPI API; MySQL (compose default) or SQLite (dev) |
+| [`platform/`](platform/) | The product surface: one searchable inventory across every source, CVE and malware (OSV `MAL-*`) views, asset-topology and component blast-radius APIs, UI-driven scans (job queue + polling runners), and authentication | React UI + FastAPI API; MySQL (compose default) or SQLite (dev) |
 | [`github-shadow-deps/`](github-shadow-deps/) | **Vector 1 — repositories:** what a repo *actually* trusts beyond its manifests — 26 phantom-dependency scanners plus syft (declared deps) + grype (CVEs), deduped into one payload | Python CLI (`github-inventory`) |
-| [`image-scanner/`](image-scanner/) | **Vectors 2 & 3 — images and runtime:** ground-truth SBOMs + CVEs for container images across registries (Docker Hub / GHCR / Harbor / ECR) and live Kubernetes / EKS / ECS workloads, including shadow-deployment detection (bundled `k8s_cartographer`) | Python CLI |
+| [`image-scanner/`](image-scanner/) | **Vectors 2 & 3 — images and runtime:** ground-truth SBOMs + CVEs for container images across registries (Docker Hub / GHCR / Harbor / ECR), Kubernetes/EKS workload cartography and shadow-deployment findings, plus running-image discovery from ECS | Python CLI |
 | [`endpoint-dep-inventory/`](endpoint-dep-inventory/) | **Vector 4 — endpoints:** which developer machines have local evidence of a package/version, for compromised-package response | Bash collector (Syft + Grype) |
 | [`supplydrift-sandbox/`](supplydrift-sandbox/) | Shared Syft/Grype execution boundary used by the Compose repository and image runners: per-invocation filesystem capabilities, minimal environments, network policy, and child-process cleanup | Python + pinned `nono` |
 
 ## How it fits together
 
-Every scanner normalizes its results into the same shape and pushes to the
-platform's per-source sync APIs (`POST /api/sync/*`); the platform dedupes
-packages by identity (purl), so the same component seen by the repo, image, and
-endpoint scanners converges on one record. Scans run on demand from the UI: a
-job queue hands work to long-running scan runners, which fetch per-connector
-config (and secrets, scoped to the claimed job) from the platform. See
+Every scanner adapts its results to the platform's normalized ingestion shape
+and pushes to a per-source sync API (`POST /api/sync/*`). Components converge on
+one record using a stable tuple: purl, then CPE, then ecosystem as the identity
+anchor, together with package name and version. Scans run on demand from the UI:
+a job queue hands work to long-running scan runners. The bundled runners include
+the claimed `connector_id` when fetching configuration; the response retains all
+connector topology but reveals secrets only for that connector and masks the
+rest. The current runner token is not connector-bound and can omit or change
+that scope to request any connector's secrets. See
 [`docs/architecture.md`](docs/architecture.md) for the scanner pipelines,
 data model, and runtime-flow details.
 
@@ -50,7 +53,7 @@ flowchart TB
     direction LR
     repositories["GitHub repositories"]
     registries["Container registries<br/>Docker Hub · GHCR · Harbor · ECR"]
-    workloads["Runtime workloads<br/>Kubernetes · EKS · ECS"]
+    workloads["Runtime discovery<br/>Kubernetes/EKS topology · ECS images"]
     endpoints["Developer endpoints"]
     osv["OSV MAL-* feed"]
 
@@ -273,8 +276,8 @@ the platform generates a runner token and shares it over an internal volume
 
 You must build the React UI **once**: it's a build artifact and is not
 committed, so a fresh clone serves a plain `SupplyDrift API` text page until you
-build it. Requires Python 3.12+ and Node.js 20+. This path uses the SQLite
-fallback datastore.
+build it. Requires Python 3.12+ and Node.js 20.19+ or 22.12+. This path uses the
+SQLite fallback datastore.
 
 ```bash
 # 1) build the UI (creates platform/frontend/dist)
@@ -331,9 +334,10 @@ See each component's README for full usage:
 ## Status & Roadmap
 
 **Works today:** all four vectors are implemented and feed one platform —
-repository scanning (26 phantom-dependency scanners + syft/grype), registry and
-image scanning (Docker Hub / GHCR / Harbor / ECR), live Kubernetes / EKS / ECS
-workload cartography with shadow-deployment findings, and endpoint collection.
+repository scanning (26 phantom-dependency scanners + Syft/Grype), registry and
+image scanning (Docker Hub / GHCR / Harbor / ECR), live Kubernetes/EKS workload
+cartography with shadow-deployment findings, ECS running-image discovery, and
+endpoint collection.
 The platform aggregates everything into a searchable inventory with
 vulnerability and OSV `MAL-*` malware views, UI-driven scans, and
 role/token-based authentication. Every component has a test suite. `bash ci.sh`
@@ -348,7 +352,8 @@ directory with `python -m pytest`.
 - EOL / base-image enrichment on top of the existing CVE mapping.
 - Lockfile/SCA versus observed-inventory **delta reporting** as a first-class report.
 - Background per-connection asset discovery on a schedule (today scans are on-demand).
-- A UI view for the existing dependency-graph API (`GET /api/graph`).
+- A UI view for the existing asset-topology API (`GET /api/graph`). Component
+  blast radius is available separately from the asset graph.
 
 The core principle stays the same: do not trust any single artifact as the full
 source of truth. Compare all observable layers and report the delta.
@@ -371,10 +376,11 @@ security boundary for every deployment:
   Kubernetes/VM deployments are not automatically placed in the same
   per-target sandbox. Future work should isolate those stages and ship
   equivalent hardened orchestration manifests.
-- **Per-connector runner-token authorization.** A runner process requests only
-  the connector for its claimed job, but the runner token itself can request
-  any connector. A stolen runner token can therefore expose all stored source
-  credentials. Connector-bound runner identities are planned.
+- **Per-connector runner-token authorization.** A bundled runner supplies its
+  claimed connector ID, which masks other connectors' secrets but does not omit
+  their topology. The runner token itself can omit or change that scope and
+  request any connector's secrets. A stolen runner token can therefore expose
+  all stored source credentials. Connector-bound runner identities are planned.
 - **API token expiry.** API tokens remain valid until explicitly revoked.
   Optional expiry, enforcement during token resolution, and UI support are
   planned; rotate runner and machine tokens operationally in the meantime.

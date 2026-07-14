@@ -5,8 +5,9 @@
 Lockfiles describe what a developer *intended* to package; container images
 describe what *actually shipped*. `image-scanner` extracts a ground-truth SBOM
 from the image itself — OS packages (dpkg/rpm/apk), language packages, and
-binaries — and feeds it to the SupplyDrift platform where it is diffed against
-the lockfile-derived SBOM.
+binaries — and feeds it to the SupplyDrift platform as an independent evidence
+source alongside repository and endpoint inventory. Automatic lockfile-versus-
+image delta reporting is not implemented yet.
 
 The design has **three pillars**:
 
@@ -17,7 +18,9 @@ The design has **three pillars**:
   SBOM. It is identical no matter where the image came from.
 - A **per-source orchestrator** (`connectors/`) discovers *which* images to scan.
   **Registries** (Docker Hub, GHCR, Harbor, ECR) are config-scoped; **services**
-  (Kubernetes, ECS, EKS) are exhaustive.
+  (Kubernetes, ECS, EKS) enumerate selected running images within their
+  configured contexts, clusters, regions, namespaces, workload/container kinds,
+  and repository/tag filters.
 
 ```mermaid
 flowchart LR
@@ -29,12 +32,12 @@ flowchart LR
   end
   inv -->|ImageTarget| core[Core ImageScanner]
   core -->|SbomExtractor| syft[syft -> CycloneDX SBOM]
-  core -->|VulnScanner| grype[grype -> CVEs on the SBOM]
+  core -.->|optional VulnScanner| grype[grype -> CVEs on the SBOM]
   core --> wrap[extract required fields -> compact normalized payload]
   wrap -->|"gzip POST /api/sync/container-images"| platform[(SupplyDrift platform)]
 ```
 
-The runner produces the full SBOM (CycloneDX) and feeds it to grype, then
+The runner produces the full SBOM (CycloneDX), optionally feeds it to grype, then
 **extracts only the fields the platform stores** — package
 name/version/purl/**ecosystem**/**type** and CVE id/severity/fix — into the
 platform's normalized `{assets, components, component_usages, findings}` shape and
@@ -43,15 +46,16 @@ small Alpine image this is ~65% smaller gzipped; the saving grows with image siz
 
 Every connector yields the same `ImageTarget`, so the core never knows the
 source. Registry connectors enumerate *projects/namespaces -> images -> tags* and,
-by default, scan the latest version per image. Service connectors enumerate every
-image in every cluster and resolve pull credentials through the shared
-`RegistryAuthIndex` — i.e. they reuse the configured registries' authentication.
+by default, scan the latest version per image. Service connectors enumerate
+running images selected by their discovery and shared scan filters, then resolve
+pull credentials through the shared `RegistryAuthIndex` — i.e. they reuse the
+configured registries' authentication.
 
 ## Install
 
 Requires Python 3.10+. The scanner core and connectors are **standard-library
 only** except PyYAML for the config. External *binaries* (installed separately,
-not pip) provide the heavy lifting:
+not from the Python requirements) provide the heavy lifting:
 
 ```bash
 pip install -r requirements.txt    # just PyYAML
@@ -62,11 +66,19 @@ pip install -r requirements.txt    # just PyYAML
 # Connector tooling, as needed:
 #   aws     CLI  (ecr / ecs / eks connectors)
 #   kubectl      (kubernetes / eks connectors, live scans)
+# Hardened runner execution:
+#   nono         (Syft/Grype capability sandbox; pinned in the runner image)
 ```
 
 **syft is required for any real scan** — even the one-image local example below
-fails without it on PATH (`--dry-run --format targets` is the only mode that
-never pulls or scans). grype is optional; without it you get SBOMs but no CVEs.
+fails without it on PATH. `--dry-run --format targets` performs discovery only;
+`--inventory-only` publishes discovery/topology payloads without pulling images
+or running Syft/Grype. grype is optional; without it you get SBOMs but no CVEs.
+The repository entry point loads the adjacent `supplydrift-sandbox` package
+automatically. Source-tree runs use sandbox mode `auto`: they use `nono` when the
+expected version is available and otherwise emit a warning before falling back
+to local execution. The supplied runner image pins `nono` and sets the mode to
+`required`.
 
 ## Usage
 
@@ -88,12 +100,17 @@ python3 image_scan.py nginx:latest -o report.json --report
 python3 image_scan.py nginx:latest -o out.json --malware
 ```
 
-`result.json` is the normalized platform payload (`{assets, components,
-component_usages, findings}`, re-ingestable via `POST /api/ingest`); `--report`
-emits `{target, asset_type, summary: {components, vulnerabilities, malware},
-components:[…], vulnerabilities:[{id,severity,package,version,fix}], malware:[…]}`.
-Both include grype CVEs + the recommended upgrade. Private images use your ambient
-Docker login.
+Local output is always a JSON array, including for one image. Each element of
+`result.json` is a normalized platform payload (`{assets, components,
+component_usages, findings}`) that can be submitted individually to
+`POST /api/ingest`; the array wrapper itself is not an ingest payload.
+`--report` instead emits an array of flattened `{target, asset_type, summary,
+components, vulnerabilities, malware}` objects for people and is not
+re-ingestable. Both forms include Grype CVEs and recommended upgrades when Grype
+is enabled and available. Local image references are anonymous by default: the
+scanner does **not** read ambient Docker credentials. To scan a private image, use configured
+mode with a registry `connection.auth` block. Select `provider: docker` explicitly
+to have the trusted parent resolve an existing `docker login`.
 
 ### Connected (config-driven, pushes to the platform)
 
@@ -113,6 +130,14 @@ python3 image_scan.py --config config.yaml --source ghcr --no-push --format json
 python3 image_scan.py --serve --config-url http://platform:8765/api/scanner/config
 ```
 
+When platform authentication is enabled, `--config-url` fetches and queue
+operations require a `runner`-scope API token. A config-file run that only pushes
+inventory can instead use an `ingest` token. The scanner reads either token from
+`SUPPLYDRIFT_RUNNER_TOKEN` or `SUPPLYDRIFT_RUNNER_TOKEN_FILE` (default
+`/run/supplydrift/runner.token`). Docker Compose generates and mounts a runner
+token file automatically. Create external tokens under **Access -> API tokens**;
+the plaintext is shown once.
+
 ### CLI options
 
 | Flag | Description |
@@ -126,7 +151,7 @@ python3 image_scan.py --serve --config-url http://platform:8765/api/scanner/conf
 | `--inventory-only` | Refresh discovered image/topology inventory without running syft or grype |
 | `--format {summary,json,targets}` | Result output style (stdout) |
 | `-o, --output FILE` | Write output to a file |
-| `--report` | Local mode: flattened `{target, asset_type, summary, components, vulnerabilities, malware}` JSON |
+| `--report` | Local mode: array of flattened `{target, asset_type, summary, components, vulnerabilities, malware}` objects |
 | `--malware` | Local mode: also check scanned packages against OSV's malicious-package (`MAL-*`) feed |
 | `-v, --verbose` / `-q, --quiet` | Progress log level (stderr) |
 | `--log-format {text,json}` | Progress log format — `json` for cron/log aggregation |
@@ -137,8 +162,11 @@ python3 image_scan.py --serve --config-url http://platform:8765/api/scanner/conf
 
 Progress is logged to **stderr** (discovery, per-image scan with `[N/total]` and
 timing, per-push, and a final `done … errors=N` line); the `--format` result goes
-to **stdout**. The process exits non-zero when there are errors — wire that to
-alerting. For scheduled/automated scans (Docker Hub and every other source) see
+to **stdout**. Except in `--dry-run`, fatal discovery, SBOM, and push errors make
+direct mode exit non-zero. Dry-run is a listing aid and currently returns zero
+even when discovery logs errors. A Grype failure is a degraded warning, not a
+fatal pipeline error, so a successful scan may contain an SBOM but no CVEs. Wire
+the exit status and warning logs to alerting. For scheduled/automated scans see
 **[deploy/README.md](deploy/README.md)** (runner image + Kubernetes CronJob,
 systemd timer, GitHub Actions, ECS scheduled task).
 
@@ -152,17 +180,22 @@ The config has two top-level source sections (see
   `scan.max_images`, `scan.max_images_per_repo` (alias `latest_versions`),
   `scan.include_tags`, `scan.exclude_tags`, `scan.max_projects`, `scan.tag_status`,
   and `scan.pushed_within_days`. The default is the latest version per repo.
-- `services`: running platforms enumerated **exhaustively** (every image in every
-  cluster). Pull credentials fall back to the configured `registries` — an image
-  whose registry is already configured reuses that credential.
+- `services`: running platforms enumerated within configured discovery and scan
+  filters, including contexts/clusters/regions, namespaces, workload/container
+  kinds, repositories, and tags. Pull credentials fall back to the configured
+  `registries` — an image whose registry is already configured reuses that
+  credential.
 
 **Public / credential-less scanning.** The `auth` block is **optional** — omit it
 (or use `auth: {provider: none}`) to scan public content anonymously:
 
-- `images: [...]` — explicit refs scanned **directly** (no discovery API,
-  anonymous pull). Works for *any* registry with no credentials, and is the only
-  way to scan **public GHCR** (its packages API needs a token even for public).
-  Bare Docker Hub names resolve to official images (`alpine` → `library/alpine`).
+- `images: [...]` — explicit refs scanned **directly** without the connector's
+  listing API. The source type still fixes the registry: `dockerhub` targets
+  Docker Hub, `ghcr` targets GHCR, and `harbor` targets its configured host. Use
+  the matching connector rather than placing an arbitrary registry host under a
+  Docker Hub source. Explicit images are the only tokenless discovery path for
+  **public GHCR** because its packages API requires authentication. Bare Docker
+  Hub names resolve to official images (`alpine` → `library/alpine`).
 - Auto-list — Docker Hub `namespaces` and Harbor public projects list anonymously
   with no `auth`. (GHCR auto-list still needs a classic PAT with `read:packages`.)
 
@@ -201,9 +234,12 @@ Authentication is a dedicated component (`auth/`), driven entirely by config:
   configured registries, with the service's own `aws_auth` as the ECR fallback.
 
 See **[docs/AUTHENTICATION.md](docs/AUTHENTICATION.md)** for per-environment
-recipes (local / CI / in-cluster). For a zero-credential offline smoke test, copy
-[config.example.yaml](config.example.yaml) to `config.local.yaml` (gitignored) and
-set `auth: { provider: none }`.
+recipes (local / CI / in-cluster). For a zero-credential discovery smoke test,
+copy [config.example.yaml](config.example.yaml) to `config.local.yaml`
+(gitignored), retain only public explicit images, set
+`auth: { provider: none }`, and use `--dry-run --format targets`. Discovery of
+remote registries still requires network access even though it does not pull an
+image.
 
 ### Adding a connector
 
@@ -233,15 +269,31 @@ them up into per-package vulnerability status — no second image pull, no Docke
 daemon. grype's DB is pre-baked into the [runner image](deploy/runner.Dockerfile);
 set `scan_vulnerabilities: false` to ship SBOMs only.
 
-The Compose runner executes every Syft/Grype target in a fresh, pinned `nono`
-capability sandbox. Code and the Grype DB are root-owned/read-only; child
-environments contain only tool settings and the current image's pull
-credential; runner, Kubernetes, AWS, and ambient Docker credentials are not
-granted. Grype has no network access. Image pulls use a registry-host proxy when
-the host supports it and emit a warning before falling back to filesystem-only
-isolation in the configured `best-effort` mode. Hosted images require the
-sandbox; source-tree development defaults to `auto` and warns if `nono` is not
-installed (`SUPPLYDRIFT_TOOL_SANDBOX=off` is an explicit local-only override).
+### Syft/Grype sandbox boundary
+
+The Compose runner executes every Syft and Grype invocation in a fresh, pinned
+`nono` capability sandbox. The child receives the exact executable and runtime
+libraries, explicit inputs/outputs, a fresh writable work area, and a strict
+tool-specific environment. Grype alone may read the immutable local Grype DB.
+The current image's resolved pull credential may be passed to image Syft; runner
+tokens, AWS credentials, kubeconfig, Docker config, and the parent process
+environment are not granted. Captured output has the exact supplied Syft token
+and password values redacted before it returns to the runner.
+
+Grype has blocked network access. Image Syft uses a registry-host-scoped proxy
+with the known authentication/blob hosts needed by Docker Hub, GHCR, Quay, or
+ECR. With the Compose default `SUPPLYDRIFT_SANDBOX_NETWORK=best-effort`, proxy
+setup failure retains filesystem and environment isolation but permits
+unrestricted pull egress after a structured warning. Set it to `require` to fail
+that image scan closed. `SUPPLYDRIFT_TOOL_SANDBOX=required` makes a missing,
+wrong-version, or failed sandbox preflight fatal; source-tree development
+defaults to `auto`, and `off` is an explicit local-only override.
+
+This boundary intentionally covers only Syft and Grype. The trusted Python
+parent, connector discovery, registry APIs, `kubectl`, AWS CLI, Docker credential
+helpers, OSV queries, platform communication, and result publication run outside
+`nono`. See the [sandbox package](../supplydrift-sandbox/README.md) for the exact
+capability and process-cleanup contract.
 
 ## Platform integration
 
@@ -295,6 +347,11 @@ owns runtime cartography and shadow-deployment detection, runnable standalone:
 ```bash
 python3 k8s_scan.py --from-json cluster-dump.json --push http://127.0.0.1:8765
 ```
+
+Set `SUPPLYDRIFT_RUNNER_TOKEN` when pushing to an authentication-enabled
+platform. Standalone collection and analysis (`--from-json`, `--manifests`, or
+live `kubectl`) run in the trusted parent and are not wrapped by the Syft/Grype
+sandbox.
 
 ## Development
 

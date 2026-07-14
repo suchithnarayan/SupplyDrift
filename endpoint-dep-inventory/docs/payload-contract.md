@@ -1,9 +1,12 @@
 # Uploaded Payload & Server Contract
 
 What the collector sends, and what a receiving server must do with it. For
-configuration and day-to-day usage see the [README](../README.md); the
-SupplyDrift platform already implements this contract on
-`POST /api/sync/endpoints`.
+configuration and day-to-day usage see the [README](../README.md).
+
+The SupplyDrift platform accepts this wire format on
+`POST /api/sync/endpoints`, but currently implements a **storage subset** of
+the complete receiver contract described below. Do not interpret the generic
+receiver recommendations as guarantees provided by the current platform.
 
 The collector uploads normalized JSON batches, not raw Syft JSON. Three payload
 kinds share one endpoint URL — dispatch on `payload_type`:
@@ -171,7 +174,33 @@ The top-level `last_full_scan` is the **oldest** across roots — a conservative
 staleness signal. Heartbeats are best-effort: never queued, never retried
 across runs, and a failed heartbeat does not fail the run.
 
-## Server contract
+## Current SupplyDrift compatibility
+
+With authentication enabled (the default), use a bearer token with `ingest`
+capability: either an `ingest`-scope token or a `runner`-scope token. The
+platform currently handles the payload kinds as follows:
+
+| Payload | Current behavior |
+| --- | --- |
+| SBOM batch | Upserts one endpoint asset, package components, and endpoint-to-component usage evidence. Basic endpoint/scanner/source/batch metadata is retained. `dependency_edges[]` and the complete `occurrences[]` detail are not persisted. |
+| Vulnerability batch | Upserts the affected package components and CVE findings, including severity and an available fix version. |
+| Heartbeat | Accepts the request, but does not persist endpoint liveness, update the endpoint asset, or retain `last_full_scan`/per-root heartbeat state. |
+
+Additional limitations of the current adapter:
+
+- It does not record or enforce the recommended
+  `endpoint.id + scan_id + batch_id` idempotency key. Stable asset/component
+  upserts make repeated content largely convergent, but there is no durable
+  per-batch acceptance record.
+- Ingestion is additive. It does not reconcile a completed full scan against a
+  prior snapshot, mark missing packages removed, or maintain separate current
+  inventory and observation history.
+- Consequently, SupplyDrift can answer which endpoint/package and endpoint/CVE
+  evidence has been ingested, but it does not yet implement the dependency
+  graph, liveness, removal, or snapshot semantics required of a complete fleet
+  inventory receiver.
+
+## Full receiver contract
 
 Endpoint:
 
@@ -184,11 +213,14 @@ Content-Encoding: gzip   # when SBOM_COMPRESS_UPLOAD=true
 
 All three payload kinds POST to the same URL — dispatch on `payload_type`.
 
-The server should:
+A receiver implementing the full contract should:
 
 - accept gzip request bodies
 - return `2xx` only after accepting the batch for ingestion
-- dedupe idempotently on `endpoint.id + scan_id + batch_id`
+- dedupe SBOM and vulnerability batches idempotently on
+  `endpoint.id + scan_id + batch_id`
+- handle heartbeats separately because they have no `batch_id`: either accept
+  repeats or dedupe them on `endpoint.id + scan_id + payload_type`
 - return `401` or `403` for authentication failures
 - return `413` when the batch is too large
 - return `429` with `Retry-After` when overloaded
@@ -205,14 +237,14 @@ Recommended indexes:
 - `dependency_kind`
 - `scan_policy_version`
 
-Inventory semantics:
+Full inventory semantics:
 
 - Treat each accepted batch as evidence for a scan.
 - Do not mark packages removed unless the endpoint completed a full scan successfully.
 - Store current inventory separately from historical observations.
 - Track ingestion lag, stale endpoints, rejected batches, queue backlog, and scan failure rates.
 
-Heartbeat payloads:
+Full heartbeat semantics:
 
 - Unchanged runs POST a single small JSON with `payload_type: "heartbeat"`,
   `status: "unchanged"`, the endpoint block, and a `last_full_scan`

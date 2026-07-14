@@ -3,8 +3,9 @@
 # Two source kinds:
 #   registries: accounts to enumerate directly (config-scoped — you cannot scan
 #               every repo/tag, so each has a `scan` template that narrows it).
-#   services:   running platforms enumerated exhaustively (every image in every
-#               cluster); pull credentials fall back to the configured registries.
+#   services:   selected running images within configured context/cluster/region,
+#               namespace, workload/container, repository, and tag filters; pull
+#               credentials fall back to the configured registries.
 #
 # Authentication is a separate concern. Registries carry an `auth` block; AWS
 # sources (ecr/ecs/eks) carry an `aws_auth` block resolved by one shared
@@ -15,6 +16,9 @@ version: 2
 platform:
   url: http://127.0.0.1:8765
   push: true
+# With platform auth enabled, provide a runner token through
+# SUPPLYDRIFT_RUNNER_TOKEN[_FILE]. An ingest-scope token is sufficient only for a
+# config-file run that pushes results without fetching platform config/queue work.
 
 scanner:
   extractor: syft               # SBOM engine (syft)
@@ -33,22 +37,23 @@ defaults:
 # --------------------------------------------------------------------------- #
 # Credentials are OPTIONAL. Omit the `auth` block to scan public content
 # anonymously. Two ways to select images:
-#   - `images`: explicit refs, scanned directly (no discovery API) — works for
-#     ANY registry with no credentials. This is the only way for public GHCR,
-#     whose discovery API requires a token even for public packages.
+#   - `images`: explicit refs scanned without the listing API. The source type
+#     still fixes the registry (Docker Hub, GHCR, or the configured Harbor host),
+#     so use the matching connector. This is the only tokenless discovery path
+#     for public GHCR, whose packages API requires authentication.
 #   - auto-list: Docker Hub `namespaces` / Harbor projects list public repos
 #     anonymously (GHCR auto-list needs a classic PAT with read:packages).
 registries:
-  # Public images, zero credentials — universal pattern:
+  # Public Docker Hub images, zero credentials:
   - name: public-images
-    type: dockerhub                  # or ghcr / harbor
+    type: dockerhub
     images:
       - library/nginx:1.27
       - alpine:3.19                  # bare name -> official image (library/alpine)
 
   - name: ghcr-public
     type: ghcr
-    images: ["anchore/syft:latest"]  # public GHCR, no token needed
+    images: ["anchore/syft:v1.44.0"] # public, version-tagged example; pin a digest in production
 
   - name: dockerhub-acme
     type: dockerhub
@@ -87,7 +92,7 @@ registries:
       repositories: ["payments/*"]
 
 # --------------------------------------------------------------------------- #
-# Services (exhaustive — all images in all clusters)
+# Services (selected running images within configured discovery/scan filters)
 # --------------------------------------------------------------------------- #
 services:
   - name: k8s-all

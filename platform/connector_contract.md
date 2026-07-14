@@ -12,16 +12,17 @@ resolves to a principal with capabilities:
 
 | Principal | Plane | Capabilities |
 |---|---|---|
-| `admin` user | session cookie | read, operate, admin (users + tokens) |
-| `member` user | session cookie | read, operate, mint scoped tokens |
+| `admin` user | session cookie | read, operate, admin, queue, ingest |
+| `member` user | session cookie | read, operate, mint ingest/readonly tokens |
 | `viewer` user | session cookie | read |
 | `runner` token | `Bearer` | claim/complete, `malware/cursor`+`match`, ingest/sync, scanner-config |
 | `ingest` token | `Bearer` | ingest/sync only |
 | `readonly` token | `Bearer` | GET only |
 
-Policy: GET `/api/*` needs **read**; mutations need **operate**; the queue M2M routes
-(`/api/scan/runs/claim`, `/complete`, `/api/malware/cursor`, `/match`) need a token's
-**queue** cap; `/api/ingest` + `/api/sync/*` need **ingest**; `/api/scanner/config`
+Policy: by default, GET `/api/*` needs **read** and mutations need **operate**; the
+queue routes
+(`/api/scan/runs/claim`, `/complete`, `/api/malware/cursor`, `/match`) need
+**queue**; `/api/ingest` + `/api/sync/*` need **ingest**; `/api/scanner/config`
 needs **queue or operate**; `/api/admin/users*` and `/api/demo/*` are **admin**;
 `/api/admin/tokens` needs **operate**; `/api/auth/me` + `/api/auth/change-password`
 need any authenticated principal. Public: static assets, `/api/health`,
@@ -33,8 +34,9 @@ need any authenticated principal. Public: static assets, `/api/health`,
 - **Scanners/runners** attach `Authorization: Bearer <token>` to the config fetch,
   claim/complete, and the ingest/sync push. **In compose this is zero-touch** — the
   platform generates a `runner` token on first boot and shares it over an internal
-  volume the runners read; resolution order is `SUPPLYDRIFT_RUNNER_TOKEN` env →
-  `SUPPLYDRIFT_RUNNER_TOKEN_FILE` (default `/run/supplydrift/runner.token`) → none.
+  volume the runners read; runner-side resolution order is
+  `SUPPLYDRIFT_RUNNER_TOKEN` env → `SUPPLYDRIFT_RUNNER_TOKEN_FILE` (default
+  `/run/supplydrift/runner.token`) → none.
 
 ```text
 POST /api/auth/login             # {username,password} -> session cookie + csrf_token
@@ -51,16 +53,24 @@ GET  /api/health                 # public liveness (used by the compose healthch
 ```text
 POST /api/sync/repositories          # repo / workflow SBOMs (github-shadow-deps)
 POST /api/sync/container-images       # OCI image SBOMs (+ provenance metadata)
-POST /api/sync/kubernetes-workloads   # running k8s workload SBOMs
-POST /api/sync/ecs-workloads          # running ECS task SBOMs
+POST /api/sync/kubernetes-workloads   # Kubernetes cluster/workload/image topology
+POST /api/sync/ecs-workloads          # normalized ECS/cloud workload payloads
 POST /api/sync/endpoints              # developer-laptop / device SBOMs
 ```
 
 Short aliases are accepted, e.g. `repository`, `registry`/`images`,
 `kubernetes`/`k8s-workloads`, `ecs`, `laptops`/`devices`.
 
-The platform does not schedule scans. Run scanners from a CLI, CI job, external
-worker, or Kubernetes CronJob and call the matching endpoint with the result.
+The platform **does** enqueue source scans and inventory refreshes from the UI/API;
+long-running image and GitHub runners claim that work from `scan_runs`. It also has
+an interval scheduler that enqueues malware jobs. There is currently no recurring
+per-connector scan scheduler: use the UI/API on demand, or invoke a scanner from a
+CLI, CI worker, or Kubernetes CronJob and submit to the matching sync endpoint.
+
+The ECS sync route accepts workload assets from external producers. The bundled
+image runner's ECS connector currently discovers running image targets and keeps
+`discovered_via`/provenance diagnostics, but does not emit ECS workload assets or
+runtime topology.
 
 ### Endpoint (developer laptop) payload
 
@@ -87,15 +97,20 @@ The `endpoints` endpoint accepts a host SBOM plus device + employee metadata in
 
 #### Native collector batches (`endpoint-dep-inventory`)
 
-`/api/sync/endpoints` **also accepts the syft endpoint collector's native batch
-format** directly — point its `SBOM_SERVER_URL` at this endpoint and it just works.
+`/api/sync/endpoints` **also accepts the Syft endpoint collector's native batch
+format** directly; point its `SBOM_SERVER_URL` at this endpoint.
 The collector runs on each device, scans with syft, and POSTs batched
 `{endpoint, scanner, source, packages[], dependency_edges[], batch_*}` JSON
-(optionally `Content-Encoding: gzip`, with a `Bearer` token the platform ignores).
+(optionally `Content-Encoding: gzip`). When auth is enabled, use an `ingest` or
+`runner` bearer token; unauthenticated sync requests return `401`.
 The platform translates each batch into one `endpoint` asset (`external_id =
 endpoint:<endpoint.id>`, details from `endpoint.{hostname,os,kernel,arch,username}`)
 plus its `packages[]` as components; batches accumulate on the same asset (idempotent
-upsert). No agent-side change is needed beyond the URL.
+upsert). The current endpoint adapter does **not** persist `dependency_edges[]` or
+collector heartbeat/liveness records, and it does not deduplicate native deliveries
+by `(endpoint.id, scan_id, batch_id)`; repeated package batches remain safe because
+asset/component/usage records are stable upserts. No agent-side change is needed
+beyond the URL and bearer token.
 
 **Vulnerability batches.** The collector also runs grype on the syft SBOM and POSTs
 a separate, minimal `{endpoint, vulnerabilities[]}` batch (same endpoint block) where
@@ -187,13 +202,19 @@ already resolved components and package paths:
 }
 ```
 
-This is the **preferred** shape for large inventories: the **image-scanner** and
-**endpoint collector** feed the full SBOM to grype on the runner, then extract only
-the required fields — component `name/version/purl/ecosystem/package_manager` and
-CVE `findings` (`finding_type=cve`) — and POST this compact payload (gzipped, via
-`Content-Encoding: gzip`) instead of the raw CycloneDX/grype documents. Components
-are deduped by purl; CVE findings reference them by purl (no package data is
-copied into findings). Sending the full CycloneDX wrapper is still supported.
+This is the **preferred** shape for large inventories. The image and repository
+scanners feed their SBOM to Grype when enabled, extract only required component/CVE
+fields, and POST compact normalized payloads instead of raw Syft/Grype documents.
+The image publisher gzip-compresses these requests by default and sets
+`Content-Encoding: gzip`; the repository publisher currently sends plain JSON.
+The endpoint collector also normalizes locally, but sends the native
+package/vulnerability batches described above for the platform adapter to
+translate. Unless a producer supplies an explicit component
+`id`, component identity is the stable
+tuple `(purl-or-CPE-or-ecosystem, name, version)`; it is not purl-only. Findings
+normally reference the payload component `ref`, with purl variants used as a
+fallback when Grype rewrites a CycloneDX bom-ref. Sending the full CycloneDX wrapper
+is still supported.
 
 Keep each call scoped to the endpoint source. Repository syncs should not submit
 container registry inventory, and Kubernetes workload syncs should not submit
@@ -213,12 +234,16 @@ The platform also recognizes `supplydrift:evidence_path`, `evidence_path`,
 
 ## Vulnerabilities (from the scan payload)
 
-Vulnerabilities are **CVE findings carried in the scan payload itself** — every
-scanner runs grype (image/github use grype's *native* JSON, the endpoint collector
-sends a minimal vuln batch) and emits `findings` with `finding_type: "cve"`,
-`severity`, the affected `component_ref`, and a **`fix_recommendation`** ("Upgrade
-<pkg> to <version>", taken from grype's `vulnerability.fix.versions`; blank when
-grype has no fix). The platform stores them as findings and rolls them up into
+Vulnerabilities are **CVE findings carried in the scan payload itself**. Grype is
+enabled by default in the bundled image and GitHub runner configuration, but it is
+still tool/configuration dependent: the GitHub scanner degrades to its
+phantom-dependency results when Syft or Grype is unavailable, the endpoint
+collector skips its optional vulnerability batch when Grype is unavailable, and
+the image scanner retains a successful SBOM if its vulnerability pass fails. When
+present, scanners emit `findings` with `finding_type: "cve"`, `severity`, the
+affected `component_ref`, and a **`fix_recommendation`** ("Upgrade <pkg> to
+<version>", taken from Grype fix versions; blank when Grype has no fix). The
+platform stores them as findings and rolls them up into
 `component_vulnerability_status` (provider `grype`).
 
 ```text
@@ -240,10 +265,14 @@ index-backed subqueries (no component×finding cross product), so even
 
 ## Asset scan status
 
-Each asset has `scan_status` (`discovered`/`scanning`/`scanned`/`failed`) and
-`last_scanned_at`. A normal scan payload marks its assets `scanned`; a
-`{"discovery_only": true}` push leaves them `discovered`. `GET /api/summary`
-returns a `scan` aggregate `{total, scanned, pending, failed}`.
+Each asset has `scan_status` and `last_scanned_at`. Current ingestion writes
+`discovered` for a `{"discovery_only": true}` payload and `scanned` for every other
+payload, including a completed scan with an empty SBOM. A discovery-only refresh
+does not downgrade an already-scanned asset. The schema/summary code also recognizes
+reserved or legacy `scanning` and `failed` values, but bundled producers do not
+currently assign them. `GET /api/summary` returns the aggregate
+`{total, scanned, pending, failed}`; queue execution state belongs to `scan_runs`,
+not the asset's `scan_status`.
 
 ## Malware monitoring (OSV)
 
@@ -259,7 +288,7 @@ malware-runner (--serve):
   POST /api/scan/runs/claim {job_type:'malware'}   # claim a queued malware run
   GET  /api/malware/cursor                          # delta window {since, now}
   → fetch OSV MAL-* feed since `since`  (on the runner)
-  POST /api/malware/match {specs, scanned_at}       # platform matches vs components, upserts alerts, Slack
+  POST /api/malware/match {specs, scanned_at}       # platform matches/upserts when in-app alerts are enabled
   POST /api/scan/runs/{id}/complete {summary}
 ```
 
@@ -268,24 +297,31 @@ POST /api/malware/scan            # enqueue a malware analysis run (202, deduped
                                   # the UI "Run analysis" button + the interval scheduler hit this
 GET  /api/malware/cursor          # delta window for the runner
 POST /api/malware/match           # runner -> platform: match specs, upsert alerts + malware findings,
-                                  # advance cursor, Slack on NEW; no-op if malware_enabled=false
+                                  # advance cursor, Slack on NEW; skipped if malware_enabled=false
 GET  /api/alerts?status=active    # paginated malware alerts; /api/summary gains malware:{active}
 GET/PUT /api/settings/malware     # {malware_enabled, platform_alerts_enabled, slack_enabled,
                                   #  slack_webhook_env, slack_channel, malware_interval_minutes, ...}
 ```
 
-`malware_enabled` is the master switch; **platform (in-app) alerts are on by
-default**, Slack is optional. The Slack webhook is stored **by env-var name**
-(`slack_webhook_env`); the value lives in the environment and is read at send time.
+`malware_enabled` is the master switch and is off by default; once enabled,
+**platform (in-app) alerts are on by default**. In the current implementation,
+turning `platform_alerts_enabled` off also suppresses matching/upserts and therefore
+Slack dispatch. Slack is optional and fires only for newly created alerts. The
+webhook is stored **by env-var name** (`slack_webhook_env`); the value lives in the
+environment and is read at send time. Active alerts are additive: there is no
+automatic reconciliation or resolve/acknowledge route when inventory later changes.
 
-Scanners can also flag malicious packages **at scan time** with `--malware`
-(local CLI): they query OSV `/v1/querybatch` (by purl) over the scanned SBOM and
-fold `MAL-*` hits into the payload as `finding_type='malware'` findings (and a
-`malware` array in `--report`).
+The image and repository scanners can also flag malicious packages **at scan
+time** with `--malware` (local CLI): they query OSV `/v1/querybatch` over the
+scanned SBOM and fold `MAL-*` hits into the payload as
+`finding_type='malware'` findings (and a `malware` array in `--report`). The
+endpoint collector supports the same networked lookup only with local
+`--output --malware`; it adds malware results to that diagnostic output and does
+not add them to its connected SBOM/vulnerability upload batches.
 
 ## Source Configuration (UI-managed)
 
-Registries and runtime services can be configured from the UI and stored in the
+Registries, runtime services, and GitHub repositories can be configured from the UI and stored in the
 `connectors` table. **Credentials are entered directly** and stored **encrypted at
 rest** (Fernet under `SUPPLYDRIFT_SECRET_KEY`, required) in a separate
 `connector_secrets` table — never in the connector config JSON, and never returned to
@@ -294,6 +330,12 @@ They are decrypted only into `/api/scanner/config` responses for bearer-authenti
 `runner` tokens, where they are emitted inline as `auth: {provider: "static", ...}`.
 Human sessions, including admins, receive masked values. Editing a connector is
 write-only: leave a secret field blank to keep the stored value.
+
+After claiming a run, bundled runners append `connector_id=<claimed-id>` to the
+config request, so only that connector's secret is returned during normal operation.
+This is operational response scoping, **not token-to-connector authorization**: a
+`runner` token is globally privileged and can omit or change that query parameter.
+Protect and rotate runner tokens accordingly.
 
 ```text
 GET    /api/connectors            # list configured sources
@@ -320,18 +362,24 @@ A connector body:
 `GET /api/scanner/config` returns `{version, registries[], services[], github[]}`.
 Each runner reads its own section — the **image-scanner** reads
 `registries`/`services`, the **github-shadow-deps** runner reads `github` (sources
-of kind `repo`, type `github`). One feed serves both:
+of kind `repo`, type `github`). One feed serves both. From the repository root,
+against the host-exposed local platform, and with a UI-minted runner token
+available through `SUPPLYDRIFT_RUNNER_TOKEN[_FILE]`:
 
 ```bash
-python3 image_scan.py --config-url http://platform:8765/api/scanner/config   # registries/services
-python3 gbom_sync.py  --config-url http://platform:8765/api/scanner/config   # github repos
+python3 image-scanner/image_scan.py --config-url http://127.0.0.1:8765/api/scanner/config
+python3 github-shadow-deps/gbom_sync.py --config-url http://127.0.0.1:8765/api/scanner/config
 ```
 
-Each scanner also runs **standalone, offline** — pass a target directly and write
-the result to a JSON file instead of pushing (`image_scan.py nginx:latest -o out.json`,
-`gbom_sync.py ./repo -o out.json`, `collect-sbom-inventory.sh --output out.json`; add
-`--report` for a flattened view). See each scanner's README. The JSON is the same
-normalized payload, re-ingestable via `POST /api/ingest`.
+Each scanner also runs **standalone** — pass a target directly and write JSON instead
+of pushing (`image_scan.py nginx:latest -o out.json`, `gbom_sync.py ./repo -o
+out.json`, or `collect-sbom-inventory.sh --output out.json`). Image and repository
+commands without `--report` write an **array** of normalized payloads; each array
+element, not the array wrapper, can be submitted to `/api/ingest` or the matching
+`/api/sync/*` route. Their `--report` output is flattened for people and is not an
+ingest payload. The endpoint collector's local `--output` aggregate is likewise a
+diagnostic format; normal server mode sends its supported native batches directly
+to `/api/sync/endpoints`. See each scanner's README for its exact output contract.
 
 ### UI-driven scans (job queue + polling runners)
 
@@ -339,23 +387,44 @@ The **Scan** button on each Sources card enqueues a job; long-running runners po
 claim, and execute it for that source (`--source <name>`), streaming results back.
 
 ```text
-POST /api/connectors/{id}/scan        # UI: enqueue a scan for this connection -> 202 (queued run)
+POST /api/connectors/{id}/scan        # UI: enqueue or reuse an active run -> 202
 POST /api/connectors/{id}/refresh     # UI: enqueue an inventory refresh -> 202 (discovery only:
-                                      # finds assets/topology and marks them pending; no SBOM/CVE scan)
+                                      # new assets are pending; scanned assets are not downgraded)
 GET  /api/connectors/{id}/scan/latest # UI badge: latest run for this connection
 GET  /api/scan/runs?connector_id=&status=   # paginated run history
-POST /api/scan/runs/claim             # runner: {job_type:'image'|'github', runner_id} -> claims oldest queued (atomic) or null
+POST /api/scan/runs/claim             # runner: {job_type:'image'|'github'|'malware', runner_id}
+                                      # -> claims oldest queued for that type (atomic) or null
 POST /api/scan/runs/{id}/complete     # runner: {status, summary, error, runner_id};
-                                      # completion is bound to the claiming runner_id
-POST /api/scan/runs/{id}/cancel       # UI "Stop": cancel a queued/running run
+                                      # ownership checked when runner_id is supplied
+POST /api/scan/runs/{id}/cancel       # UI "Stop": mark a queued/running run canceled
 POST /api/connectors/{id}/scan/cancel # UI "Stop": cancel this connector's active run, if any
 ```
 
-Runs live in `scan_runs` (`queued → running → succeeded|failed|canceled`). Enqueue is
-**deduped** (one pending run per connector); claim is **atomic** (`UPDATE…RETURNING`),
-so multiple runner replicas never double-scan. `source_type` picks the runner:
+Runs live in `scan_runs` (`queued → running → succeeded|failed|canceled`). Enqueue
+checks for and reuses an existing queued or running run for the connector. Claim
+uses a dialect-agnostic compare-and-set: select the oldest queued ID, then update
+it only while its status is still `queued`. A losing replica returns `null` and
+polls again, so replicas do not double-scan. `source_type` picks the runner:
 registry/service types → `image` runner, `github` → `github` runner. The runner is
 the scanner in **`--serve`** mode (`image_scan.py --serve --config-url …`).
+
+Bundled runners always send `runner_id`, so completion is normally accepted only
+from the recorded claimer. The compatibility path still accepts a completion that
+omits `runner_id`; ownership is therefore not an unconditional API guarantee.
+Canceling a **running** run changes database/UI state only—it cannot signal or kill
+the scanner process. If that runner later completes, its completion can overwrite
+the canceled state.
+
+Running jobs older than `SUPPLYDRIFT_SCAN_STALE_SECONDS` (default one hour) are
+marked failed when run status is read. Platform startup reaps every previously
+running job immediately because its original runner may no longer be alive. These
+operations do not kill a scanner either; a genuine late completion can still
+overwrite the reaped state.
+
+Do not confuse `scan_runs` with `scan_jobs`. `scan_runs` is the user-visible queue
+and run history. Each ingested payload also upserts an internal `scan_jobs` audit
+row, but the two tables have no direct foreign key and the run-history API does not
+expose `scan_jobs`; one queued source run can produce multiple payload/audit rows.
 
 **Demo data (optional).** `POST /api/demo/reset` and `POST /api/demo/load` seed the
 built-in demo inventory. They are **404 unless `SUPPLYDRIFT_DEMO` is set** and are
@@ -364,10 +433,12 @@ admin-gated; `reset` **wipes all data** first. Keep them off in production.
 A `github` source is `{name, source_type: "github", connection: {owner | repositories,
 auth: {token_env}}, scan: {repositories}}`. Its scan output is POSTed to
 `/api/sync/repositories` as the normalized `{assets, components, component_usages,
-findings}` shape. Each repo scan runs **three** engines, deduped into one payload:
+findings}` shape. A full repo scan combines up to **three** engines into one payload:
 the phantom-dependency engine (non-manifest deps → component + finding per
-detection), **syft** (declared dependencies → components), and **grype** (CVE
-findings over the syft SBOM, with `fix_recommendation`).
+detection), **Syft** (declared dependencies → components), and **Grype** (CVE
+findings over the Syft SBOM, with `fix_recommendation`). Syft/Grype are optional at
+runtime; when unavailable, the repository scan still returns phantom-dependency
+results.
 
 ## Graph
 
