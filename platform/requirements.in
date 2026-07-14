@@ -1,0 +1,13 @@
+# SupplyDrift platform (FastAPI/uvicorn).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+# Data layer: SQLAlchemy 2.0 Core engine (SQLite for dev/tests, MySQL in prod).
+SQLAlchemy>=2.0
+# MySQL driver (pure-Python) + cryptography for MySQL 8 caching_sha2 auth and for
+# encrypting stored connector credentials.
+PyMySQL>=1.1
+cryptography>=42
+# Starlette/FastAPI TestClient uses httpx2 in current releases (dev/test only).
+# httpx2 is the Pydantic-stewarded continuation of encode/httpx, NOT a typosquat:
+# https://github.com/pydantic/httpx2 (provenance verified 2026-07).
+httpx2>=2.4

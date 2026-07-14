@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>myapp</artifactId>
+  <version>1.0.0</version>
+
+  <repositories>
+    <!-- SAFE: standard Maven Central -->
+    <repository>
+      <id>central</id>
+      <url>https://repo.maven.apache.org/maven2</url>
+    </repository>
+
+    <!-- SHADOW: non-standard Maven repository -->
+    <repository>
+      <id>custom-repo</id>
+      <url>https://custom-packages.example.com/maven2</url>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-core</artifactId>
+      <version>5.3.0</version>
+    </dependency>
+
+    <!-- SHADOW: systemPath dependency (vendored jar) -->
+    <dependency>
+      <groupId>com.proprietary</groupId>
+      <artifactId>sdk</artifactId>
+      <version>1.0</version>
+      <scope>system</scope>
+      <systemPath>${project.basedir}/lib/proprietary-sdk.jar</systemPath>
+    </dependency>
+  </dependencies>
+</project>

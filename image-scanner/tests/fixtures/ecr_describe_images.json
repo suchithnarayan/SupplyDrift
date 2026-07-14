@@ -1,0 +1,32 @@
+{
+  "imageDetails": [
+    {
+      "registryId": "123456789012",
+      "repositoryName": "payments-api",
+      "imageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "imageTags": ["prod-2026-05-25", "latest"],
+      "imagePushedAt": "2026-05-25T09:41:00+00:00"
+    },
+    {
+      "registryId": "123456789012",
+      "repositoryName": "payments-api",
+      "imageDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "imageTags": ["prod-2026-04-01"],
+      "imagePushedAt": "2026-04-01T09:41:00+00:00"
+    },
+    {
+      "registryId": "123456789012",
+      "repositoryName": "payments-api",
+      "imageDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "imageTags": ["prod-2025-01-01"],
+      "imagePushedAt": "2025-01-01T09:41:00+00:00"
+    },
+    {
+      "registryId": "123456789012",
+      "repositoryName": "payments-api",
+      "imageDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "imageTags": ["v1-debug"],
+      "imagePushedAt": "2026-05-20T09:41:00+00:00"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+# Example configuration file for github-inventory
+# Pass this exact file with --config, or opt in to target-owned policy with
+# --trust-target-config when scanning this repository itself.
+
+version: 1
+
+# Ignore specific patterns (matched against extracted_dep field using regex)
+ignore:
+  - pattern: "https://dl.google.com/go/.*"
+    reason: "Official Go distribution downloads"
+
+  - pattern: "actions/checkout@v[0-9]+"
+    reason: "Widely-used GitHub action, tag acceptable for internal policy"
+
+  - pattern: "https://get.docker.com"
+    reason: "Official Docker installation script, approved by security team"
+
+# Exclude file paths from scanning (glob patterns)
+exclude_paths:
+  - "vendor/**"
+  - "third_party/**"
+  - "**/*.min.js"
+  - "**/*.map"
+  - "docs/examples/**"
+
+# Override severity for specific pattern IDs
+severity_overrides:
+  # Escalate unpinned GitHub Actions from HIGH to CRITICAL
+  unpinned-github-action:
+    severity: critical
+
+  # Downgrade brew installs from LOW to acceptable
+  brew-install-ci:
+    severity: low
+
+  # Treat vendored binaries as acceptable (if intentional)
+  vendored-executable:
+    severity: low
+
+# Additional trusted container registries (beyond defaults)
+# Defaults: docker.io, gcr.io, ghcr.io, quay.io, *.ecr.*.amazonaws.com, *.azurecr.io
+trusted_registries:
+  - "internal-registry.company.com"
+  - "*.corp.example.com"
+  - "artifacts.corp.example.com"

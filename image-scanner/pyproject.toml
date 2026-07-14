@@ -1,0 +1,11 @@
+[project]
+name = "image-scanner"
+version = "0.1.0"
+description = "Container image SBOM extraction with a pluggable connector framework (SupplyDrift Vector 2)"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "../supplydrift-sandbox/src"]
+testpaths = ["tests"]

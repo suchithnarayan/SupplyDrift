@@ -1,0 +1,38 @@
+# gitleaks config for SupplyDrift. Extends the built-in ruleset (AWS keys, GitHub
+# tokens, PEM private keys, etc.) with the project's own token formats.
+title = "SupplyDrift gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "supplydrift-platform-token"
+description = "SupplyDrift platform/API token (sdp_)"
+regex = '''sdp_[A-Za-z0-9_-]{32,}'''
+keywords = ["sdp_"]
+
+[[rules]]
+id = "supplydrift-runner-token"
+description = "SupplyDrift runner token (sdr_)"
+regex = '''sdr_[A-Za-z0-9_-]{32,}'''
+keywords = ["sdr_"]
+
+# Keep every exception bound to both an exact path and an exact synthetic value.
+# A different secret in the same file must still fail the scan.
+[[allowlists]]
+description = "Synthetic credentials used by sanitizer unit tests"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)github-shadow-deps/tests/test_sanitizer\.py$''']
+regexes = [
+  '''^abc123def456ghi789jkl012$''',
+  '''(?s)^-----BEGIN OPENSSH PRIVATE KEY-----\\n"\s*"b3BlbnNzaC1rZXktdjEAAAAA\\n"\s*"-----END OPENSSH PRIVATE KEY-----$''',
+  '''^sk_live_abcdef0123456789ABCDEF$''',
+]
+
+[[allowlists]]
+description = "Documented local Compose token placeholder"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)docs/local-docker-compose\.md$''']
+regexes = ['''^sdp_replace_with_the_generated_token$''']

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "github-inventory"
+version = "0.1.0"
+description = "Detect shadow dependencies that traditional SCA tools miss"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "rich>=12.0",
+    "pyyaml>=6.0",
+    "regex==2026.6.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+github-inventory = "github_inventory.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "../supplydrift-sandbox/src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100

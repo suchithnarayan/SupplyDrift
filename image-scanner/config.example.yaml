@@ -1,0 +1,118 @@
+# image-scanner config (SupplyDrift Vector 2 + 3)
+#
+# Two source kinds:
+#   registries: accounts to enumerate directly (config-scoped — you cannot scan
+#               every repo/tag, so each has a `scan` template that narrows it).
+#   services:   running platforms enumerated exhaustively (every image in every
+#               cluster); pull credentials fall back to the configured registries.
+#
+# Authentication is a separate concern. Registries carry an `auth` block; AWS
+# sources (ecr/ecs/eks) carry an `aws_auth` block resolved by one shared
+# component (IAM role / access keys / profile / default chain).
+
+version: 2
+
+platform:
+  url: http://127.0.0.1:8765
+  push: true
+
+scanner:
+  extractor: syft               # SBOM engine (syft)
+  scan_vulnerabilities: true    # run grype over each SBOM and sync CVEs as findings
+  concurrency: 4
+  timeout: 600
+
+# Deep-merged into every source's filters.
+defaults:
+  scan:
+    tag_status: tagged
+    exclude_tags: ["*-debug", "*-test"]
+
+# --------------------------------------------------------------------------- #
+# Registries (config-scoped)
+# --------------------------------------------------------------------------- #
+# Credentials are OPTIONAL. Omit the `auth` block to scan public content
+# anonymously. Two ways to select images:
+#   - `images`: explicit refs, scanned directly (no discovery API) — works for
+#     ANY registry with no credentials. This is the only way for public GHCR,
+#     whose discovery API requires a token even for public packages.
+#   - auto-list: Docker Hub `namespaces` / Harbor projects list public repos
+#     anonymously (GHCR auto-list needs a classic PAT with read:packages).
+registries:
+  # Public images, zero credentials — universal pattern:
+  - name: public-images
+    type: dockerhub                  # or ghcr / harbor
+    images:
+      - library/nginx:1.27
+      - alpine:3.19                  # bare name -> official image (library/alpine)
+
+  - name: ghcr-public
+    type: ghcr
+    images: ["anchore/syft:latest"]  # public GHCR, no token needed
+
+  - name: dockerhub-acme
+    type: dockerhub
+    connection:
+      namespaces: [acme, acme-internal]      # required (Docker Hub has no catalog)
+      auth: { provider: env, username_env: DOCKERHUB_USER, password_env: DOCKERHUB_PAT }
+    scan:
+      pushed_within_days: 90
+      max_images_per_repo: 1                  # default: latest version per repo
+
+  - name: ghcr-acme
+    type: ghcr
+    connection:
+      owner: acme
+      owner_type: org                         # org | user
+      auth: { provider: env, username_env: GH_USER, token_env: GH_PAT }  # classic PAT, read:packages
+    scan:
+      repositories: ["acme/*"]
+
+  - name: harbor-prod
+    type: harbor
+    connection:
+      url: https://harbor.acme.io
+      auth: { provider: env, username_env: HARBOR_ROBOT, password_env: HARBOR_SECRET }  # robot$… + secret
+    scan:
+      projects: ["team-*"]
+
+  - name: ecr-prod
+    type: ecr
+    connection:
+      aws_auth:
+        profile: prod                         # or access_key_id/secret_access_key, or role_arn
+        regions: [us-east-1, eu-west-1]
+      account_id: "123456789012"              # optional; cross-account via --registry-id
+    scan:
+      repositories: ["payments/*"]
+
+# --------------------------------------------------------------------------- #
+# Services (exhaustive — all images in all clusters)
+# --------------------------------------------------------------------------- #
+services:
+  - name: k8s-all
+    type: kubernetes
+    connection:
+      kubeconfig: ~/.kube/config
+      contexts: ["*"]                         # default: every context (all clusters)
+    discovery:
+      namespaces: ["*"]
+      include_init: true
+      include_ephemeral: true
+
+  - name: eks-prod
+    type: eks
+    connection:
+      aws_auth:
+        profile: prod
+        regions: [us-east-1]
+        role_arn: arn:aws:iam::123456789012:role/SupplyDriftScanner   # optional
+      clusters: ["*"]                         # default: all clusters in the region(s)
+    discovery:
+      namespaces: ["*"]
+
+  - name: ecs-prod
+    type: ecs
+    connection:
+      aws_auth: { profile: prod, regions: [us-east-1] }
+      clusters: ["*"]

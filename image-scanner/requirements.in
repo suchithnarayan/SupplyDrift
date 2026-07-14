@@ -1,0 +1,3 @@
+# The scanner core and connectors are Python standard-library only.
+# PyYAML is required to read the YAML config file.
+PyYAML>=6.0

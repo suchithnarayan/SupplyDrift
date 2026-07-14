@@ -1,0 +1,70 @@
+name: endpoint-collector-ci
+
+on:
+  push:
+    paths:
+      - "endpoint-dep-inventory/**"
+      - ".github/workflows/endpoint-collector-ci.yml"
+  pull_request:
+    paths:
+      - "endpoint-dep-inventory/**"
+      - ".github/workflows/endpoint-collector-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: lint + smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The macOS leg exercises the BSD find / bash 3.2 portability the
+        # collector promises; Ubuntu covers the GNU side.
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: endpoint-dep-inventory
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install shellcheck
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y shellcheck
+          else
+            brew install shellcheck
+          fi
+
+      - name: Install syft (pinned — the smoke test asserts exact fixture counts)
+        run: |
+          version=1.44.0
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) asset="syft_${version}_linux_amd64.tar.gz"; sha="0e91737aee2b5baf1d255b959630194a302335d848ff97bb07921eb6205b5f5a" ;;
+            Linux-aarch64|Linux-arm64) asset="syft_${version}_linux_arm64.tar.gz"; sha="6f6cdcdc695721d91ce756e3b5bc3e3416599c464101f5e32e9c3f33054ee6d9" ;;
+            Darwin-x86_64) asset="syft_${version}_darwin_amd64.tar.gz"; sha="c40ece5407927327f94f35901727dbc604b46857e04f04ec94a310845fb71bde" ;;
+            Darwin-arm64) asset="syft_${version}_darwin_arm64.tar.gz"; sha="24e4d34078ae81da7c82539616f0ccac3e226cf4f74a38ce6fb3463619e50a55" ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -sSfL -o "/tmp/$asset" "https://github.com/anchore/syft/releases/download/v${version}/$asset"
+          if command -v sha256sum >/dev/null 2>&1; then
+            echo "$sha  /tmp/$asset" | sha256sum -c -
+          else
+            echo "$sha  /tmp/$asset" | shasum -a 256 -c -
+          fi
+          tar -xzf "/tmp/$asset" -C /usr/local/bin syft
+          syft version
+
+      - name: Syntax checks
+        run: |
+          bash -n collect-sbom-inventory.sh
+          bash -n sbom-inventory.env.example
+          bash -n sbom-inventory.supplydrift.env.example
+          python3 -m py_compile sbom-dummy-server.py
+
+      - name: shellcheck
+        run: shellcheck collect-sbom-inventory.sh tests/collector-smoke.sh
+
+      - name: Smoke test
+        run: ./tests/collector-smoke.sh

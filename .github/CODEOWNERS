@@ -1,0 +1,5 @@
+# Default owner for everything in the repo.
+# See https://docs.github.com/articles/about-code-owners
+# One line: CODEOWNERS is last-match-wins, so separate `*` lines would leave
+# only the final one effective.
+*       @suchithnarayan @hariprasadpo28

@@ -1,0 +1,219 @@
+# SupplyDrift — platform + always-on image / github / malware runners that claim
+# jobs from the platform's queue (the UI "Scan" / "Run analysis" buttons enqueue).
+#
+#   docker compose up -d                                          # everything
+#   docker compose up -d --scale image-runner=3                   # more image workers
+#   KUBECONFIG_HOST=$HOME/.kube/config docker compose up -d image-runner  # enable k8s
+#
+# The image-runner is universal: it scans container registries AND Kubernetes/EKS
+# (its image bundles syft + grype + kubectl + AWS CLI). k8s is off until you point
+# KUBECONFIG_HOST at a kubeconfig — see the image-runner block below.
+#
+# Enable Slack malware alerts by setting SUPPLYDRIFT_SLACK_WEBHOOK on the platform
+# (the platform stores only the env-var name; the value stays in the environment).
+name: supplydrift
+
+services:
+  # MySQL 8 — the production datastore. Data persists in the db-data volume (for a
+  # bind mount, replace `db-data:/var/lib/mysql` with `./mysql-data:/var/lib/mysql`).
+  db:
+    # Digest-pinned (tag kept for readability) for reproducible, tamper-evident pulls.
+    image: mysql:8.4.10@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-supplydrift}"
+      MYSQL_USER: "${MYSQL_USER:-supplydrift}"
+      # No insecure defaults: these MUST be supplied (e.g. via .env) or startup fails.
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}"
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      # Read the root password from the env (MYSQL_PWD) instead of the argv so it
+      # isn't visible via `docker inspect` / process listing. The `$$` escapes
+      # Compose interpolation so the rendered config keeps a literal
+      # $MYSQL_ROOT_PASSWORD that the container shell expands at runtime from this
+      # service's own environment — the value is never baked into the config.
+      # Force TCP on 3306: MySQL's one-time initialization server accepts local
+      # socket connections while the real TCP server is still unavailable.
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin --protocol=tcp -h 127.0.0.1 -P 3306 -uroot --silent ping"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  platform:
+    build:
+      context: .
+      dockerfile: platform/Dockerfile
+    image: supplydrift-platform:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Bind to localhost by default (front with a TLS proxy for remote access).
+      # Set BIND_ADDR=0.0.0.0 to expose on all interfaces.
+      - "${BIND_ADDR:-127.0.0.1}:8765:8765"
+    volumes:
+      - supplydrift-data:/data
+      # Auth is ON by default. The platform generates the runner token here on first
+      # boot; the runners mount this same volume read-only and read it — zero-touch.
+      - runner-auth:/run/supplydrift
+    environment:
+      # Production datastore = MySQL. Omit this to fall back to a SQLite file in /data.
+      SUPPLYDRIFT_DATABASE_URL: "mysql+pymysql://${MYSQL_USER:-supplydrift}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@db:3306/${MYSQL_DATABASE:-supplydrift}"
+      SUPPLYDRIFT_PUBLIC_URL: "http://localhost:8765"
+      # First-run admin (seeded once on an empty DB). Set these in a .env file.
+      SUPPLYDRIFT_ADMIN_USER: "${SUPPLYDRIFT_ADMIN_USER:-admin}"
+      SUPPLYDRIFT_ADMIN_PASSWORD: "${SUPPLYDRIFT_ADMIN_PASSWORD:-}"
+      # Set SUPPLYDRIFT_AUTH=disabled for a trusted local/dev network (no login).
+      SUPPLYDRIFT_AUTH: "${SUPPLYDRIFT_AUTH:-enabled}"
+      # Required to store source credentials (encrypts them at rest). See .env.example.
+      SUPPLYDRIFT_SECRET_KEY: "${SUPPLYDRIFT_SECRET_KEY:-}"
+      # SUPPLYDRIFT_SLACK_WEBHOOK: "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+    # Runners wait for this before polling, so they never hit a not-yet-bound port.
+    # Uses the PUBLIC /api/health endpoint (works whether or not auth is enabled).
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8765/api/health"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  # Malware-analysis runner: claims 'malware' jobs from the queue, fetches the OSV
+  # MAL-* delta, and POSTs specs to the platform to match. Reuses the platform image.
+  malware-runner:
+    image: supplydrift-platform:latest
+    depends_on:
+      platform:
+        condition: service_healthy
+    command: ["python3", "malware_runner.py", "--serve", "--platform-url", "http://platform:8765"]
+    volumes:
+      - runner-auth:/run/supplydrift:ro   # read the bundled runner token (zero-touch auth)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  # Universal scan runner: polls the platform queue and runs every "image" job —
+  # container registries (Docker Hub / GHCR / Harbor / ECR) AND Kubernetes / EKS
+  # workloads. The image ships with all the tooling (syft + grype + kubectl + AWS
+  # CLI), so this one runner can claim any image job — there is no separate k8s
+  # runner, and no risk of a k8s job landing on a runner that lacks kubectl.
+  # Scale with `docker compose up -d --scale image-runner=3`.
+  #
+  # ── Kubernetes / EKS scanning (optional) ───────────────────────────────────
+  # k8s scanning needs a kubeconfig. It is OFF by default: the mount below points
+  # at /dev/null (a harmless no-op) until you supply one. To enable, set
+  # KUBECONFIG_HOST to your kubeconfig path and (re)start the runner:
+  #
+  #     KUBECONFIG_HOST=$HOME/.kube/config docker compose up -d image-runner
+  #
+  # The kubeconfig is mounted read-only at /home/app/.kube/config (KUBECONFIG points
+  # there). The scanner only needs read (get/list) on workloads — prefer a
+  # read-only context / ServiceAccount. Then add a "kubernetes" source in the UI
+  # (Sources → Add) and click Scan; this runner claims the job and pushes back.
+  #
+  # LOCAL CLUSTERS (kind / minikube / Docker Desktop): a kubeconfig whose server
+  # is https://127.0.0.1:PORT is NOT reachable from inside the container. Point it
+  # at https://host.docker.internal:PORT (uncomment extra_hosts below; you may
+  # also need `insecure-skip-tls-verify: true` if the cert lacks a matching SAN),
+  # or scan an offline dump captured on the host:
+  #     kubectl get deployments,daemonsets,statefulsets,cronjobs,jobs,pods \
+  #        -A -o json > cluster-dump.json
+  #
+  # EKS / ECR: also uncomment the ~/.aws mount + AWS_* env below.
+  image-runner:
+    build:
+      context: .
+      dockerfile: image-scanner/deploy/runner.Dockerfile
+      # kubectl + AWS CLI are installed by default (see runner.Dockerfile ARGs);
+      # build with --build-arg INSTALL_KUBECTL=false to slim the image.
+    image: supplydrift-image-runner:latest
+    depends_on:
+      platform:
+        condition: service_healthy
+    command: ["--serve", "--config-url", "http://platform:8765/api/scanner/config", "--log-format", "json"]
+    environment:
+      # Parent-side kubectl/AWS caches need a writable home; credentials remain
+      # on the explicit read-only paths below, while /tmp is ephemeral tmpfs.
+      HOME: /tmp/runner-home
+      XDG_CACHE_HOME: /tmp/runner-cache
+      KUBECONFIG: /home/app/.kube/config
+      AWS_CONFIG_FILE: /home/app/.aws/config
+      AWS_SHARED_CREDENTIALS_FILE: /home/app/.aws/credentials
+      # Hosted runners must never execute Syft/Grype without filesystem isolation.
+      # Landlock V3 hosts retain the documented image-pull egress fallback.
+      SUPPLYDRIFT_TOOL_SANDBOX: required
+      SUPPLYDRIFT_SANDBOX_NETWORK: best-effort
+      # AWS — only for EKS / ECR sources. Uncomment and set as needed:
+      # AWS_PROFILE: default
+      # AWS_REGION: us-east-1
+    volumes:
+      - runner-auth:/run/supplydrift:ro   # read the bundled runner token (zero-touch auth)
+      # Optional kubeconfig: defaults to /dev/null (no-op) until KUBECONFIG_HOST
+      # is set to your kubeconfig path. Mounted read-only at the runner user's home.
+      - ${KUBECONFIG_HOST:-/dev/null}:/home/app/.kube/config:ro
+      # AWS credentials for EKS / ECR (read-only) — uncomment if you scan them:
+      # - ${HOME}/.aws:/home/app/.aws:ro
+    # Local clusters (kind/minikube/Docker Desktop) are reached through the host.
+    # This kubeconfig points at kubernetes.docker.internal:6443 (Docker Desktop), so
+    # map that name to the host gateway inside the container. The API server cert's
+    # SAN includes that hostname, so TLS still verifies — no insecure-skip needed.
+    extra_hosts:
+      - "kubernetes.docker.internal:host-gateway"
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=2g,mode=1777
+    pids_limit: 256
+    mem_limit: 4g
+    cpus: 2.0
+    restart: unless-stopped
+
+  github-runner:
+    build:
+      context: .
+      dockerfile: github-shadow-deps/deploy/runner.Dockerfile
+    image: supplydrift-github-runner:latest
+    depends_on:
+      platform:
+        condition: service_healthy
+    command: ["--serve", "--config-url", "http://platform:8765/api/scanner/config", "--log-format", "json"]
+    environment:
+      # Git and other parent-side caches stay on the per-container tmpfs.
+      HOME: /tmp/runner-home
+      XDG_CACHE_HOME: /tmp/runner-cache
+      SUPPLYDRIFT_TOOL_SANDBOX: required
+      SUPPLYDRIFT_SANDBOX_NETWORK: best-effort
+    volumes:
+      - runner-auth:/run/supplydrift:ro   # read the bundled runner token (zero-touch auth)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=1g,mode=1777
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    restart: unless-stopped
+
+volumes:
+  db-data:          # MySQL data (production datastore persistence)
+  supplydrift-data: # SQLite fallback + runner-token volume base
+  runner-auth:

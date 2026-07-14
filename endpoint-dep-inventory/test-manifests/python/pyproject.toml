@@ -1,0 +1,9 @@
+[project]
+name = "syft-python-fixture"
+version = "0.1.0"
+description = "Minimal Python manifest fixture for Syft SBOM scans"
+requires-python = ">=3.11"
+dependencies = [
+  "flask==3.0.2",
+  "requests==2.31.0",
+]

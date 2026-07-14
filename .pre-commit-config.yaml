@@ -1,0 +1,9 @@
+# Run `pre-commit install` once to enable. Scans staged changes for secrets
+# (including the project's sdp_/sdr_ token formats — see .gitleaks.toml).
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    # Keep this aligned with secret-scan.yml; top-level [[allowlists]] requires
+    # gitleaks >= 8.25.0.
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks

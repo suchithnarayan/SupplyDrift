@@ -1,0 +1,29 @@
+# Local collector state and generated uploads
+.agents/
+.codex/
+.sbom-inventory/
+received-sbom-batches/
+sbom-inventory.env
+.env
+.env.local
+.env.*.local
+*.local.env
+*.token
+*.syft.json
+
+# Python/dev artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs and temporary files
+*.log
+*.tmp
+tmp/
+temp/

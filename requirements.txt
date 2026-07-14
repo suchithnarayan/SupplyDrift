@@ -1,0 +1,9 @@
+# This repository has NO top-level Python package. Dependencies live per component:
+#   platform/requirements.txt           (FastAPI platform)
+#   github-shadow-deps/requirements.txt (repo scanner)
+#   image-scanner/requirements.txt      (image / k8s scanner)
+# Install from the component you are working on, e.g.:
+#   pip install -r platform/requirements.txt
+#
+# (This file previously contained a single unpinned, non-existent package name,
+# which was a dependency-confusion risk if installed.)

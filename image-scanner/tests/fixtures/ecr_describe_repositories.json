@@ -1,0 +1,6 @@
+{
+  "repositories": [
+    {"repositoryName": "payments-api", "registryId": "123456789012"},
+    {"repositoryName": "web", "registryId": "123456789012"}
+  ]
+}

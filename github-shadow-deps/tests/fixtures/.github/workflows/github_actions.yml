@@ -1,0 +1,45 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # SHADOW: action pinned to mutable branch
+      - uses: actions/checkout@main
+
+      # SHADOW: action pinned to tag, not SHA
+      - uses: actions/setup-node@v4
+
+      # SAFE: action pinned to SHA (should NOT be flagged)
+      - uses: actions/setup-python@4b0d1b8e7b8f1c2b3a4d5e6f7a8b9c0d1e2f3a4b
+
+      # SHADOW: tool downloaded inside run block
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+
+      # SHADOW: curl | bash
+      - name: Install nvm
+        run: curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+
+      # SHADOW: npm global install
+      - name: Install typescript
+        run: npm install -g typescript@5.0.0
+
+      # SHADOW: npx execution
+      - name: Run linter
+        run: npx eslint@8 src/
+
+      # SHADOW: go install
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.54.2
+
+      # SHADOW REFERENCE: local script reference (will trigger Phase 1.5 scanning)
+      - name: Run deployment script
+        run: ./scripts/deploy.sh
+
+      # SAFE: comment, should not be flagged
+      # run: curl https://example.com | bash

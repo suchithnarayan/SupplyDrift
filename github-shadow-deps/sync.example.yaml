@@ -1,0 +1,38 @@
+# github-shadow-deps -> SupplyDrift platform sync config.
+#
+# Run:  python3 gbom_sync.py --config sync.example.yaml
+#   or: python3 gbom_sync.py --config-url http://127.0.0.1:8765/api/scanner/config
+#
+# Auth is OPTIONAL. Omit it (or list explicit public repos) to scan public repos
+# anonymously; a classic PAT (read-only) is only needed for private repos. The
+# PAT is referenced by env-var name — the platform never stores the value.
+
+version: 1
+platform:
+  url: http://127.0.0.1:8765
+  push: true
+scanner:
+  concurrency: 2
+  clone_timeout: 120
+
+sources:
+  # Public repos, zero credentials — list them explicitly:
+  - name: public
+    type: github
+    connection:
+      repositories:
+        - nvm-sh/nvm
+        - https://github.com/octocat/Hello-World
+
+  # A whole org/user, auto-listed via the GitHub API (PAT for private repos):
+  - name: acme-org
+    type: github
+    connection:
+      owner: acme
+      owner_type: org              # org | user
+      visibility: all              # all | public | private
+      auth: { provider: env, token_env: GITHUB_TOKEN }   # optional
+    scan:
+      repositories: ["*"]          # repo-name globs (use "owner/*" to match full names)
+      include_archived: false
+      max_repos: null

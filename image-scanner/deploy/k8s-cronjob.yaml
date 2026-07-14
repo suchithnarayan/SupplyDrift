@@ -1,0 +1,113 @@
+# Scheduled SupplyDrift runners as Kubernetes CronJobs.
+#
+# Two runners on different cadences, each scoped to the source types whose
+# credentials/access it carries. Both pull the source list from the platform
+# (so adding a source in the UI requires no redeploy) and push SBOMs back.
+#
+# They run on a SEPARATE node pool from the platform (nodeSelector: workload=batch)
+# with their own CPU/mem/ephemeral-storage so heavy syft pulls never starve the API/UI.
+# NOTE: the `dockerhub-creds` Secret referenced below is provisioned OUT OF BAND —
+# never commit credentials to the repo. Create it with one of:
+#   kubectl -n supplydrift create secret generic dockerhub-creds \
+#     --from-literal=username=<user> --from-literal=token=<docker-hub-PAT>
+# or manage it via Sealed Secrets / External Secrets Operator / SOPS.
+---
+# Registry runner — registries only (Docker Hub / GHCR / Harbor / ECR). Hourly.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: supplydrift-registry-scan
+  namespace: supplydrift
+spec:
+  schedule: "0 * * * *"               # top of every hour
+  concurrencyPolicy: Forbid           # never overlap runs
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3000      # kill a stuck run after 50m
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector: { workload: batch }   # separate from platform nodes
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: runner
+              image: your-registry/supplydrift-runner:latest
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              args:
+                - "--config-url"
+                - "http://supplydrift-platform.supplydrift.svc:8765/api/scanner/config"
+                - "--log-format"
+                - "json"
+              # syft unpacks layers to disk → give it real ephemeral storage + RAM.
+              resources:
+                requests: { cpu: "500m", memory: "1Gi", ephemeral-storage: "10Gi" }
+                limits:   { cpu: "2",    memory: "4Gi", ephemeral-storage: "40Gi" }
+              env:
+                - { name: DOCKERHUB_USER,  valueFrom: { secretKeyRef: { name: dockerhub-creds, key: username } } }
+                - { name: DOCKERHUB_TOKEN, valueFrom: { secretKeyRef: { name: dockerhub-creds, key: token } } }
+---
+# Cluster runner — scans the running workloads of this cluster. Every 30 min.
+# Uses an in-cluster ServiceAccount with read-only RBAC (below).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: supplydrift-cluster-scan
+  namespace: supplydrift
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1500
+      template:
+        spec:
+          serviceAccountName: supplydrift-scanner   # read-only, see RBAC below
+          restartPolicy: Never
+          nodeSelector: { workload: batch }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: runner
+              image: your-registry/supplydrift-runner:latest   # build with kubectl included
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              args:
+                - "--config-url"
+                - "http://supplydrift-platform.supplydrift.svc:8765/api/scanner/config"
+                - "--source"
+                - "in-cluster"        # the name of your kubernetes source in the UI
+                - "--log-format"
+                - "json"
+              resources:
+                requests: { cpu: "500m", memory: "1Gi", ephemeral-storage: "20Gi" }
+                limits:   { cpu: "2",    memory: "6Gi", ephemeral-storage: "60Gi" }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: supplydrift-scanner, namespace: supplydrift }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: supplydrift-scanner-readonly }
+rules:
+  - apiGroups: ["", "apps", "batch"]
+    resources: ["pods", "deployments", "statefulsets", "daemonsets", "replicasets", "jobs", "cronjobs"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: supplydrift-scanner-readonly }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: supplydrift-scanner-readonly }
+subjects:
+  - { kind: ServiceAccount, name: supplydrift-scanner, namespace: supplydrift }

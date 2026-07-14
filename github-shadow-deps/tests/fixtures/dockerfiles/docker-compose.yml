@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  # SHADOW REFERENCE: references a Dockerfile
+  api:
+    build: ./Dockerfile
+    ports:
+      - "8080:8080"
+
+  # SHADOW: unpinned image tag
+  db:
+    image: postgres:latest
+    environment:
+      POSTGRES_PASSWORD: secret

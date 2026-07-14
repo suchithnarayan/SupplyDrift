@@ -1,0 +1,138 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.mypy_cache/
+.ruff_cache/
+.nox/
+.cache/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+.direnv/
+.venv-platform/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+!**/*.env.example
+*.local.env
+*.token
+.npmrc
+.pypirc
+.netrc
+id_rsa
+id_ed25519
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Local agent/runtime folders
+.agents/
+.codex/
+.claude/
+**/.claude/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+
+# JavaScript/frontend artifacts
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+.next/
+.nuxt/
+.svelte-kit/
+playwright-report/
+test-results/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Endpoint dependency inventory collector outputs
+**/.sbom-inventory/
+**/received-sbom-batches/
+**/*.syft.json
+**/sbom-inventory.env
+!**/sbom-inventory.env.example
+
+# Project-specific scan outputs
+results.sarif
+shadow-deps.json
+shadow-deps.sarif
+github-inventory-results.*
+scan-results/
+results-json/
+cloned-repos/
+repo-cache/
+tmp-repos/
+sample-repos/
+github-shadow-deps/sample-repos/
+*.log
+
+# Local scan/eval artifacts
+results.tsv
+results_ai.tsv
+run.log
+run_ai.log
+.github-inventory-cache/
+platform/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend
+node_modules/
+platform/frontend/dist/
+*.tsbuildinfo
+
+# CI runner virtualenv
+.ci-venv/
+
+# The Python "lib/" rule above also matches the frontend's source lib — keep it tracked.
+!platform/frontend/src/lib/
+!platform/frontend/src/lib/**

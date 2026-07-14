@@ -1,0 +1,16 @@
+{
+  "lockfileVersion": 0,
+  "workspaces": {
+    "": {
+      "name": "syft-node-bun-fixture",
+      "dependencies": {
+        "express": "4.18.2",
+        "lodash": "4.17.21"
+      }
+    }
+  },
+  "packages": {
+    "express": ["express@4.18.2", {}, "express-4.18.2"],
+    "lodash": ["lodash@4.17.21", {}, "lodash-4.17.21"]
+  }
+}

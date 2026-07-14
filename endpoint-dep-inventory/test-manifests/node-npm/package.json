@@ -1,0 +1,11 @@
+{
+  "name": "syft-node-npm-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal npm manifest fixture for Syft SBOM scans",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "express": "4.18.2",
+    "lodash": "4.17.21"
+  }
+}

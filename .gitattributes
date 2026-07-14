@@ -1,0 +1,2 @@
+# CRLF line endings make Bash entrypoints fail before execution.
+*.sh text eol=lf

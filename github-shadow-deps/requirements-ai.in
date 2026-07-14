@@ -1,0 +1,3 @@
+-c requirements.txt
+anthropic>=0.40.0
+idna>=3.15

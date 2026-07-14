@@ -1,0 +1,55 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.direnv/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!*.env.example
+*.local.env
+*.token
+.npmrc
+!.github-inventory.yml
+
+# Local scan outputs
+results.sarif
+shadow-deps.json
+shadow-deps.sarif
+github-inventory-results.*
+scan-results/
+results-json/
+
+# Optional local real-repo smoke targets
+sample-repos/
+test-repos/
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

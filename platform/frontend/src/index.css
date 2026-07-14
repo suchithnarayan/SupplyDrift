@@ -1,0 +1,150 @@
+@import "tailwindcss";
+
+/* ---- Design tokens (Tailwind v4 @theme generates utilities: bg-panel, text-critical, ...) ---- */
+@theme {
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-bg: #05070f;
+  --color-bg-2: #080c18;
+  --color-panel: #0c1326;
+  --color-panel-2: #0f1830;
+  --color-line: #1b2742;
+  --color-ink: #e8edf8;
+  --color-muted: #8c97b0;
+  --color-faint: #5b6b8c;
+
+  --color-brand: #2dd4bf;
+  --color-brand-2: #6366f1;
+  --color-accent: #38bdf8;
+  --color-violet: #a78bfa;
+
+  --color-critical: #fb5a73;
+  --color-high: #ff9d57;
+  --color-medium: #ffd166;
+  --color-low: #56b9ff;
+  --color-info: #8c97b0;
+  --color-good: #45d483;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Ambient glows live on a single fixed compositor layer behind everything, so
+   they never repaint on scroll (background-attachment: fixed would). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 560px at 12% -10%, rgba(45, 212, 191, 0.10), transparent 60%),
+    radial-gradient(1000px 600px at 100% 0%, rgba(99, 102, 241, 0.12), transparent 55%),
+    radial-gradient(900px 700px at 50% 120%, rgba(56, 189, 248, 0.07), transparent 60%);
+}
+
+::selection {
+  background: rgba(45, 212, 191, 0.3);
+}
+
+/* Interactive affordance: native <button> defaults to the arrow cursor, which
+   makes everything feel "dead". Give every interactive control the hand. */
+button,
+[role="button"],
+a,
+summary,
+label[for] {
+  cursor: pointer;
+}
+button:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* Scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #233055 transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #1d2a49;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+@layer components {
+  /* No backdrop-filter: a solid-ish translucent panel over the dark bg reads as
+     "glass" but costs nothing per frame (blur on every card was the main jank). */
+  .glass {
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: linear-gradient(180deg, rgba(17, 24, 43, 0.92), rgba(11, 17, 32, 0.94));
+    border-radius: 1rem;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 14px 32px -26px rgba(0, 0, 0, 0.9);
+  }
+  .glass-hover {
+    transition: border-color 160ms ease, transform 160ms ease;
+  }
+  .glass-hover:hover {
+    border-color: rgba(45, 212, 191, 0.35);
+    transform: translateY(-2px);
+  }
+  .brand-text {
+    background: linear-gradient(100deg, var(--color-brand), var(--color-accent) 45%, var(--color-brand-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .ring-focus:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.6);
+  }
+}
+
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 0.5rem;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(69, 212, 131, 0.5); }
+  50% { opacity: 0.6; box-shadow: 0 0 0 6px rgba(69, 212, 131, 0); }
+}
+.live-dot {
+  animation: pulse-dot 2s infinite;
+}
+
+@keyframes grid-pan {
+  to { background-position: 40px 40px; }
+}

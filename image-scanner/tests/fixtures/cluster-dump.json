@@ -1,0 +1,181 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "payments-api",
+        "namespace": "payments",
+        "uid": "11111111-0000-0000-0000-000000000001",
+        "labels": {"app.kubernetes.io/managed-by": "Helm", "app": "payments-api"},
+        "annotations": {"meta.helm.sh/release-name": "payments-api", "meta.helm.sh/release-namespace": "payments"},
+        "managedFields": [{"manager": "helm", "operation": "Update"}]
+      },
+      "spec": {
+        "replicas": 3,
+        "template": {
+          "spec": {
+            "serviceAccountName": "payments-api",
+            "containers": [
+              {"name": "payments", "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/payments-api@sha256:9c2d8bb9e8b91f2c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "web",
+        "namespace": "web",
+        "uid": "11111111-0000-0000-0000-000000000002",
+        "labels": {"argocd.argoproj.io/instance": "web", "app": "web"},
+        "managedFields": [{"manager": "argocd-application-controller", "operation": "Apply"}]
+      },
+      "spec": {
+        "replicas": 2,
+        "template": {
+          "spec": {
+            "serviceAccountName": "web",
+            "containers": [
+              {"name": "web", "image": "ghcr.io/acme/web:1.4.2"}
+            ],
+            "initContainers": [
+              {"name": "migrate", "image": "ghcr.io/acme/web-migrate:1.4.2"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "metadata": {
+        "name": "log-collector",
+        "namespace": "observability",
+        "uid": "11111111-0000-0000-0000-000000000003",
+        "labels": {"kustomize.toolkit.fluxcd.io/name": "observability"},
+        "managedFields": [{"manager": "kustomize-controller", "operation": "Apply"}]
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {"name": "collector", "image": "ghcr.io/acme/log-collector@sha256:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "CronJob",
+      "metadata": {
+        "name": "data-migration",
+        "namespace": "default",
+        "uid": "11111111-0000-0000-0000-000000000004",
+        "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"batch/v1\"}"},
+        "managedFields": [{"manager": "kubectl-client-side-apply", "operation": "Update"}]
+      },
+      "spec": {
+        "jobTemplate": {
+          "spec": {
+            "template": {
+              "spec": {
+                "serviceAccountName": "default",
+                "containers": [
+                  {"name": "runner", "image": "python:latest"}
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "debug-shell",
+        "namespace": "default",
+        "uid": "11111111-0000-0000-0000-000000000005",
+        "managedFields": [{"manager": "kubectl-run", "operation": "Update"}]
+      },
+      "spec": {
+        "nodeName": "ip-10-16-44-91.ec2.internal",
+        "containers": [
+          {"name": "debug", "image": "busybox"}
+        ]
+      },
+      "status": {
+        "containerStatuses": [
+          {"name": "debug", "image": "busybox:latest", "imageID": "docker.io/library/busybox@sha256:1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"}
+        ]
+      }
+    },
+    {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "metadata": {
+        "name": "adhoc-backup",
+        "namespace": "ops",
+        "uid": "11111111-0000-0000-0000-000000000006",
+        "managedFields": [{"manager": "kubectl-create", "operation": "Update"}]
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {"name": "backup", "image": "registry.internal.acme.com/backup:2.0"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "ReplicaSet",
+      "metadata": {
+        "name": "payments-api-67bb5f9f68",
+        "namespace": "payments",
+        "uid": "11111111-0000-0000-0000-000000000007",
+        "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "payments-api"}],
+        "managedFields": [{"manager": "kube-controller-manager", "operation": "Update"}]
+      },
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {"name": "payments", "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/payments-api@sha256:9c2d8bb9e8b91f2c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "payments-api-67bb5f9f68-24x9k",
+        "namespace": "payments",
+        "uid": "11111111-0000-0000-0000-000000000008",
+        "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "payments-api-67bb5f9f68"}],
+        "managedFields": [{"manager": "kube-controller-manager", "operation": "Update"}]
+      },
+      "spec": {
+        "nodeName": "ip-10-16-44-91.ec2.internal",
+        "containers": [
+          {"name": "payments", "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/payments-api:prod-2026-05-25"}
+        ]
+      },
+      "status": {
+        "containerStatuses": [
+          {"name": "payments", "image": "payments-api:prod", "imageID": "123456789012.dkr.ecr.us-east-1.amazonaws.com/payments-api@sha256:9c2d8bb9e8b91f2c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"}
+        ]
+      }
+    }
+  ]
+}
