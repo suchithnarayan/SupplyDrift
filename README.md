@@ -409,7 +409,7 @@ component map, dev setup, and how to run the checks (`bash ci.sh`), and
 ---
 
 <a href="https://github.com/suchithnarayan/supplydrift/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=suchithnarayan/supplydrift" alt="Contributors to PMG" />
+  <img src="https://contrib.rocks/image?repo=suchithnarayan/SupplyDrift" alt="Contributors to PMG" />
 </a>
 </div>
 
