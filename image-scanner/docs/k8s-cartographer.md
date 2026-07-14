@@ -7,9 +7,10 @@ Lockfile-based SCA never looks at what is *actually running* in your clusters.
 workload, resolves the container image each one runs, and flags two classes of
 phantom dependency that pipelines and SCA miss entirely:
 
-- 🕳️ **Shadow deployments** — workloads applied directly to the cluster
-  (`kubectl apply`, `helm install` from a laptop, `kubectl run`) with **no
-  GitOps, Helm, or operator provenance**. No pipeline, no scan, no audit trail.
+- 🕳️ **Shadow deployments** — workloads applied directly to the cluster with
+  interactive clients such as `kubectl apply` or `kubectl run`, with **no
+  GitOps, Helm, or operator provenance**. These may bypass the normal delivery
+  pipeline and its associated review and scanning controls.
 - 📌 **Mutable / untrusted images** — containers running `:latest` (or any
   non-digest tag) or pulling from registries outside your approved allowlist.
 
@@ -39,7 +40,8 @@ pip install -r requirements.txt
 ```
 
 For a **live** scan it shells out to `kubectl` (read-only `kubectl get`), so a
-working kubeconfig is all you need. Offline scans need nothing but Python.
+working kubeconfig is all you need. Offline JSON-dump scans need nothing beyond
+Python; YAML manifest directories require PyYAML as described above.
 
 ## Usage
 
@@ -59,13 +61,20 @@ python3 k8s_scan.py --context prod-eks-1 --provider aws --environment production
 python3 k8s_scan.py --from-json cluster-dump.json \
   --trusted-registry '123456789012.dkr.ecr.*' --trusted-registry 'ghcr.io'
 
-# Emit the normalized payload and push it to the platform
-python3 k8s_scan.py --from-json cluster-dump.json \
+# Emit the normalized payload and push it to the platform. Put a UI-minted
+# ingest token in a mode-600 file first.
+SUPPLYDRIFT_RUNNER_TOKEN_FILE=/secure/path/supplydrift-ingest.token \
+  python3 k8s_scan.py --from-json cluster-dump.json \
   --format json --push http://127.0.0.1:8765
 
 # CI gate: non-zero exit if anything is critical
 python3 k8s_scan.py --context prod --fail-on critical
 ```
+
+The captured dump includes full workload specs and managed fields. Those can
+contain literal environment values, command arguments, and sensitive metadata;
+store the dump with restrictive permissions, never commit it, and delete it
+when the offline analysis is complete.
 
 ### Options
 
@@ -85,6 +94,13 @@ python3 k8s_scan.py --context prod --fail-on critical
 | `--push URL` | POST the payload to a platform base URL |
 | `--fail-on {critical,high,medium,low}` | Exit 1 at/above this severity |
 | `--version` | Print the scanner version and exit |
+
+`--push` sends an `Authorization: Bearer` header from
+`SUPPLYDRIFT_RUNNER_TOKEN`, or from `SUPPLYDRIFT_RUNNER_TOKEN_FILE` (default
+`/run/supplydrift/runner.token`). An `ingest`-scope API token is sufficient and
+recommended for this standalone push; a `runner` token also works but adds
+configuration and queue authority needed only by the bundled worker. Collection
+and analysis need no platform token when output stays local.
 
 ## How shadow deployments are detected
 
@@ -110,11 +126,18 @@ A workload with **no** sanctioned provenance is flagged `shadow_deployment`:
 Every finding records the reasons, the `managedFields` managers, and the
 service account in its evidence so a human can confirm the verdict.
 
-> **Orphan images** (running containers with no source repo or CI pipeline
-> anywhere in the org) are a *cross-source* correlation: this scanner supplies
-> the runtime side, and the platform joins it against repository and registry
-> inventory. EOL/CVE flagging for image contents is the registry scanner's job
-> (Vector 2).
+> **Orphan images** (running containers with no source repo or CI pipeline) need
+> cross-source correlation. This scanner supplies the runtime asset and
+> image-to-workload edge, but the current platform does not automatically infer
+> orphan status by joining repository, registry, and runtime inventories. A
+> producer must submit explicit provenance relationships, or an operator must
+> perform that correlation separately. CVE flagging for image contents is the
+> image scanner's job (Vector 2).
+
+Shadow detection is metadata-based evidence, not proof of how a workload was
+created. Custom delivery controllers may be reported as shadows until they add a
+recognized managed-by label/annotation or manager marker. Review the recorded
+reasons and managers before remediation.
 
 ## Output → platform mapping
 
@@ -126,6 +149,29 @@ The normalized payload maps directly onto the platform data model:
 - `container_image` asset per unique image reference
 - relationships: `workload —belongs_to→ cluster`, `image —runs_in→ workload`
 - findings: `shadow_deployment`, `unpinned_image`, `untrusted_registry`
+
+The relationship directions above are literal: workload `belongs_to` cluster,
+and image `runs_in` workload. The standalone cartographer does not extract an
+SBOM or create component/CVE records; the integrated `kubernetes`/`eks` image
+pipeline publishes topology and then scans the same discovered images.
+
+## Execution trust boundary
+
+Live collection shells out to `kubectl` in the trusted runner process. The
+workload `kubectl get` call strips `SUPPLYDRIFT_RUNNER_TOKEN` and
+`SUPPLYDRIFT_SECRET_KEY` from its child environment while retaining `PATH`,
+`HOME`, kubeconfig, and AWS values required by Kubernetes/EKS authentication.
+Context listing and cluster-name autodetection currently inherit the parent
+environment. Offline JSON/manifest parsing and all cartography heuristics also
+run in the trusted Python process.
+
+The shared Nono capability sandbox is intentionally limited to Syft and Grype;
+it does not wrap `kubectl`, manifest parsing, or this analyzer. Run the
+cartographer as a non-root user, use read-only Kubernetes RBAC and kubeconfig
+mounts, treat cluster-returned metadata as untrusted output, and keep the runner
+separate from the platform. See
+[`../../supplydrift-sandbox/README.md`](../../supplydrift-sandbox/README.md) for
+the exact parser boundary.
 
 ## Development
 

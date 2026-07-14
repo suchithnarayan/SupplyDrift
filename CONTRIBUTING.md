@@ -12,8 +12,9 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 | --- | --- | --- |
 | `platform/` | React UI + FastAPI API (MySQL in compose, SQLite for dev) — aggregates every source; auth, scans, vuln/malware views | Python 3.12+, TypeScript/React |
 | `github-shadow-deps/` | Repository-level phantom-dependency scanner (CLI package `github-inventory`) | Python 3.10+ |
-| `image-scanner/` | Container/registry + Kubernetes/EKS SBOM scanner | Python 3.10+ |
+| `image-scanner/` | Container/registry SBOM scanner, Kubernetes/EKS topology scanner, and ECS running-image discovery | Python 3.10+ |
 | `endpoint-dep-inventory/` | Syft-based endpoint SBOM collector (bash) | Bash 3.2+ |
+| `supplydrift-sandbox/` | Shared per-invocation Syft/Grype capability boundary used by the hardened runners | Python 3.10+ |
 
 The collector is a single portable bash script with strict compatibility rules —
 see [Endpoint collector house rules](#endpoint-collector-house-rules-bash) below
@@ -22,9 +23,9 @@ before touching it.
 ## Development setup
 
 Install the tools the CI uses (all optional stages are skipped if a tool is
-missing): `python3` (3.10+, 3.12+ for the platform), `node`/`npm` (20+, only to
-build the UI), `git`, and — for the collector's smoke tests — `syft`, `grype`,
-`jq`, and `shellcheck`.
+missing): `python3` (3.10+, 3.12+ for the platform), `node`/`npm` (20.19+ or
+22.12+, only to build the UI), `git`, and — for the collector's smoke tests —
+`syft`, `grype`, `jq`, and `shellcheck`.
 
 Enable the secret-scanning pre-commit hook (recommended):
 
@@ -34,12 +35,15 @@ pip install pre-commit && pre-commit install   # runs gitleaks on every commit
 
 ## Running the checks
 
-The single umbrella check mirrors CI — a fresh venv, all three pytest suites, the
-frontend typecheck + build, and the collector's shell checks:
+The umbrella check covers the platform, image scanner, repository scanner,
+frontend, and endpoint collector: a fresh venv, three pytest suites, the frontend
+typecheck/build, and the collector's shell checks. The sandbox suite is currently
+separate and must also be run for a complete repository check:
 
 ```bash
-bash ci.sh            # run everything (reuses .ci-venv if present)
+bash ci.sh            # run the umbrella checks (reuses .ci-venv if present)
 bash ci.sh --fresh    # wipe the venv + frontend node_modules/dist first
+(cd supplydrift-sandbox && python -m pytest)
 ```
 
 Per-component, once dependencies are installed:
@@ -48,13 +52,15 @@ Per-component, once dependencies are installed:
 (cd platform            && python -m pytest)
 (cd image-scanner       && python -m pytest)
 (cd github-shadow-deps  && python -m pytest && ruff check .)
+(cd supplydrift-sandbox && python -m pytest)
 ```
 
 Other useful scripts:
 
 - `platform/smoke.sh` — boots a throwaway platform instance and exercises the API.
 - `github-shadow-deps/scripts/regression.sh` — fixture-based scanner regression run.
-- `e2e-cli.sh` — end-to-end CLI flow across the components (needs `syft`, `grype`, `jq`).
+- `e2e-cli.sh` — end-to-end CLI flow across the components (needs `syft`, `grype`,
+  `jq`, `curl`, `python3`, and network access for dependencies and the test image).
 
 ## Endpoint collector house rules (bash)
 
@@ -67,7 +73,8 @@ the same suite on Ubuntu **and macOS** — both must pass):
 ```bash
 cd endpoint-dep-inventory
 bash -n collect-sbom-inventory.sh
-bash -n sbom-inventory.env.example sbom-inventory.supplydrift.env.example
+bash -n sbom-inventory.env.example
+bash -n sbom-inventory.supplydrift.env.example
 shellcheck collect-sbom-inventory.sh tests/collector-smoke.sh
 python3 -m py_compile sbom-dummy-server.py
 ./tests/collector-smoke.sh

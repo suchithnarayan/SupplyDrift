@@ -1,15 +1,19 @@
 # Scheduled SupplyDrift runners as Kubernetes CronJobs.
 #
-# Two runners on different cadences, each scoped to the source types whose
-# credentials/access it carries. Both pull the source list from the platform
-# (so adding a source in the UI requires no redeploy) and push SBOMs back.
+# Two direct runners on different cadences, each scoped to a named UI source.
+# Replace the example --source values and duplicate a CronJob when more source
+# names need independent schedules or credentials.
 #
 # They run on a SEPARATE node pool from the platform (nodeSelector: workload=batch)
 # with their own CPU/mem/ephemeral-storage so heavy syft pulls never starve the API/UI.
-# NOTE: the `dockerhub-creds` Secret referenced below is provisioned OUT OF BAND —
-# never commit credentials to the repo. Create it with one of:
+# NOTE: the `supplydrift-runner-auth` and `dockerhub-creds` Secrets referenced
+# below are provisioned OUT OF BAND — never commit credentials to the repo.
+# Create them from protected files so values do not appear in process arguments:
+#   kubectl -n supplydrift create secret generic supplydrift-runner-auth \
+#     --from-file=token=/secure/path/supplydrift-runner.token
 #   kubectl -n supplydrift create secret generic dockerhub-creds \
-#     --from-literal=username=<user> --from-literal=token=<docker-hub-PAT>
+#     --from-file=username=/secure/path/dockerhub.username \
+#     --from-file=token=/secure/path/dockerhub.pat
 # or manage it via Sealed Secrets / External Secrets Operator / SOPS.
 ---
 # Registry runner — registries only (Docker Hub / GHCR / Harbor / ECR). Hourly.
@@ -29,6 +33,7 @@ spec:
       activeDeadlineSeconds: 3000      # kill a stuck run after 50m
       template:
         spec:
+          automountServiceAccountToken: false
           restartPolicy: Never
           nodeSelector: { workload: batch }   # separate from platform nodes
           securityContext:
@@ -37,13 +42,16 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: runner
-              image: your-registry/supplydrift-runner:latest
+              image: your-registry/supplydrift-image-runner:replace-with-digest
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: true
               args:
                 - "--config-url"
-                - "http://supplydrift-platform.supplydrift.svc:8765/api/scanner/config"
+                - "https://supplydrift.example/api/scanner/config"
+                - "--source"
+                - "prod-registry"      # replace with a registry source name from the UI
                 - "--log-format"
                 - "json"
               # syft unpacks layers to disk → give it real ephemeral storage + RAM.
@@ -51,8 +59,18 @@ spec:
                 requests: { cpu: "500m", memory: "1Gi", ephemeral-storage: "10Gi" }
                 limits:   { cpu: "2",    memory: "4Gi", ephemeral-storage: "40Gi" }
               env:
+                - { name: HOME, value: /tmp/runner-home }
+                - { name: XDG_CACHE_HOME, value: /tmp/runner-cache }
+                - { name: SUPPLYDRIFT_TOOL_SANDBOX, value: required }
+                - { name: SUPPLYDRIFT_SANDBOX_NETWORK, value: best-effort }
+                - { name: SUPPLYDRIFT_RUNNER_TOKEN, valueFrom: { secretKeyRef: { name: supplydrift-runner-auth, key: token } } }
                 - { name: DOCKERHUB_USER,  valueFrom: { secretKeyRef: { name: dockerhub-creds, key: username } } }
-                - { name: DOCKERHUB_TOKEN, valueFrom: { secretKeyRef: { name: dockerhub-creds, key: token } } }
+                - { name: DOCKERHUB_PAT, valueFrom: { secretKeyRef: { name: dockerhub-creds, key: token } } }
+              volumeMounts:
+                - { name: runner-tmp, mountPath: /tmp }
+          volumes:
+            - name: runner-tmp
+              emptyDir: { sizeLimit: 40Gi }
 ---
 # Cluster runner — scans the running workloads of this cluster. Every 30 min.
 # Uses an in-cluster ServiceAccount with read-only RBAC (below).
@@ -78,20 +96,32 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: runner
-              image: your-registry/supplydrift-runner:latest   # build with kubectl included
+              image: your-registry/supplydrift-image-runner:replace-with-digest # include kubectl
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
+                readOnlyRootFilesystem: true
               args:
                 - "--config-url"
-                - "http://supplydrift-platform.supplydrift.svc:8765/api/scanner/config"
+                - "https://supplydrift.example/api/scanner/config"
                 - "--source"
                 - "in-cluster"        # the name of your kubernetes source in the UI
                 - "--log-format"
                 - "json"
+              env:
+                - { name: HOME, value: /tmp/runner-home }
+                - { name: XDG_CACHE_HOME, value: /tmp/runner-cache }
+                - { name: SUPPLYDRIFT_TOOL_SANDBOX, value: required }
+                - { name: SUPPLYDRIFT_SANDBOX_NETWORK, value: best-effort }
+                - { name: SUPPLYDRIFT_RUNNER_TOKEN, valueFrom: { secretKeyRef: { name: supplydrift-runner-auth, key: token } } }
               resources:
                 requests: { cpu: "500m", memory: "1Gi", ephemeral-storage: "20Gi" }
                 limits:   { cpu: "2",    memory: "6Gi", ephemeral-storage: "60Gi" }
+              volumeMounts:
+                - { name: runner-tmp, mountPath: /tmp }
+          volumes:
+            - name: runner-tmp
+              emptyDir: { sizeLimit: 60Gi }
 ---
 apiVersion: v1
 kind: ServiceAccount

@@ -38,8 +38,12 @@ pip install -r requirements.txt
 pip install -r requirements-ai.txt
 ```
 
-The base scanner is fully offline — only `requirements.txt` is needed.
-`requirements-ai.txt` is optional and only required if you pass `--ai`.
+For a **local directory**, the base scanner is offline: it reads the checkout
+and makes no network requests. `scan.py` accepts a GitHub URL (not a bare
+`owner/repo` slug) and first uses `git` to clone it, so that path requires
+network access. The platform-oriented `gbom_sync.py` accepts either form.
+`requirements-ai.txt` is optional and only required if you pass `--ai`, which
+calls the configured LLM service.
 
 You can also install it as a package: `pip install -e .` provides a
 `github-inventory` console command equivalent to `python3 scan.py`.
@@ -103,7 +107,7 @@ python3 scan.py scan --help
 | `--width, -w N` | auto | Table output width in columns. |
 | `--ai` | off | Enable AI-powered analysis (needs the optional AI SDK + API key). |
 | `--ai-model ID` | see `--help` | AI model id used in `--ai` mode. |
-| `--ai-max-files N` | `20` | Cap the number of files sent to the LLM in `--ai` mode. |
+| `--ai-max-files N` | `20` | Cap files sent to the primary AI analyzer; reference resolution and enrichment have separate limits. |
 | `--enrich` | off | Enrich findings with AI-generated context. Requires `--ai`. |
 | `--deep-lockfile` | off | Parse `package-lock.json` / `pnpm-lock.yaml` / `bun.lock` for transitive packages with install hooks. Slower; opt-in. |
 
@@ -118,7 +122,7 @@ Valid `--category` values (also the `category` field in JSON/SARIF output):
 ## Features
 
 - **26 specialized scanners** across shadow-dependency categories — script installs, binary downloads, unmanaged packages, git deps, container images, CI/CD, vendored binaries, build-system externals, MCP servers, agent plugin manifests, package catalogs, reference tracking, and more
-- **Optional AI-powered analysis** (`--ai`) — LLM catches variable URLs, indirect execution, and novel patterns the regex layer misses; offline by default
+- **Optional AI-powered analysis** (`--ai`) — LLM catches variable URLs, indirect execution, and novel patterns the regex layer misses; local-directory regex scans are offline by default
 - **Optional finding enrichment** (`--ai --enrich`) — adds dependency context and fix recommendations
 - **Reference tracking** — automatically follows and scans scripts/files referenced from configs
 - **Targeted docs scanning** — scans agent/MCP/install docs with dependency commands while avoiding broad README noise
@@ -305,8 +309,9 @@ shadow-deps:
   script:
     - python /tmp/SupplyDrift/github-shadow-deps/scan.py scan . --format json -o shadow-deps.json --fail-on high
   artifacts:
-    reports:
-      codequality: shadow-deps.json
+    when: always
+    paths:
+      - shadow-deps.json
 ```
 
 ## AI-Powered Analysis (optional)
@@ -336,15 +341,21 @@ score; only findings above 0.7 are reported.
 
 ### Security model
 
-- **Offline by default.** Without `--ai`, no network calls are made and the
-  optional AI SDK is not even imported.
+- **Local scans are offline by default.** Without `--ai`, scanning a local
+  directory makes no network calls and the optional AI SDK is not imported.
+  A GitHub URL still requires a network clone before scanning.
 - **Secrets are stripped before any LLM call.** A pre-processing sanitizer
   redacts AWS keys, GitHub tokens, generic API keys/passwords, private key
   blocks, and connection-string passwords. See `src/github_inventory/sanitizer.py`.
-- **No URL fetches.** Enrichment data comes from the model's training
-  knowledge — the tool never fetches URLs found in scanned code.
-- **Cost-bounded.** `--ai-max-files` caps the number of files sent to the
-  LLM. Internally rate-limited to 10 calls/minute with exponential backoff.
+- **No target-URL fetches.** The AI layer does not fetch URLs found in scanned
+  code; enrichment comes from the model. This does not include the explicit
+  GitHub clone requested when the scan target itself is a URL.
+- **Stage-specific cost controls.** `--ai-max-files` caps only the primary AI
+  analyzer, whose calls are limited to 10/minute with exponential backoff. AI
+  reference resolution may make up to 10 additional calls per scan. Enrichment
+  sends at most 10 unique dependencies per request, so its call count grows
+  with the number of unique dependencies. Those latter stages do not share the
+  primary analyzer's per-minute limiter.
 - **Failures are soft.** Missing API key or missing SDK → AI is skipped, the
   regex scan still produces output.
 
@@ -360,7 +371,7 @@ score; only findings above 0.7 are reported.
 
 Beyond the standalone CLI, `gbom_sync.py` enumerates an org/user's repositories
 (or an explicit list), scans each, and **syncs the results to the SupplyDrift
-platform**. Each repo scan runs **three** engines, deduped into one payload:
+platform**. Each repo scan combines up to **three** engines into one payload:
 
 1. the **phantom-dependency** engine (non-manifest deps → a component *and* a
    finding per detection);
@@ -372,33 +383,61 @@ when the binaries are present; baked into the
 [runner image](./deploy/runner.Dockerfile)) — without them the scan still ships
 phantom-dependency findings.
 
-In the Compose runner, each repository/SBOM invocation gets a fresh, mandatory
-`nono` capability sandbox with block-all networking, a minimal environment, and
-only the cloned target or temporary SBOM plus the immutable Grype DB readable.
-The runner token and all other parent credentials remain outside the sandbox;
-application code and the database are root-owned/read-only. Local source-tree
-runs default to compatibility mode and warn if `nono` is unavailable.
+The security boundary has two layers in the reference Compose deployment:
+
+- The long-running runner is non-root, drops all Linux capabilities, enables
+  `no-new-privileges`, and has a read-only container filesystem. Repository
+  discovery, cloning, the Python phantom-dependency engine, and platform
+  uploads run in this parent process; its temporary clones live on `/tmp`
+  tmpfs and these operations necessarily retain network access.
+- Each **Syft and Grype subprocess** gets a fresh, mandatory `nono` capability
+  sandbox. It receives a minimal environment, block-all networking, and only
+  the cloned target or temporary SBOM plus the immutable Grype DB as readable
+  inputs. The GitHub PAT, platform runner token, and other parent credentials
+  are not passed into those tool sandboxes.
+
+The Python phantom-dependency engine itself is not wrapped by `nono`. Local
+source-tree runs use sandbox `auto` mode for Syft/Grype: they warn and run those
+tools without filesystem isolation if `nono` is unavailable. Set
+`SUPPLYDRIFT_TOOL_SANDBOX=required` to fail closed like the Compose runner.
 
 ```bash
 # Local, one repo -> JSON file (no platform, no config; auto --no-push)
 python3 gbom_sync.py ./my-repo -o result.json             # a local checkout
 python3 gbom_sync.py octocat/Hello-World -o result.json   # a github slug (clones it)
 python3 gbom_sync.py ./my-repo -o report.json --report    # flattened report
-python3 gbom_sync.py ./my-repo -o out.json --malware      # + OSV malicious-package (MAL-*) check
+python3 gbom_sync.py ./my-repo -o out.json --malware      # + networked OSV malicious-package (MAL-*) check
 
-# Connected: public repos, no credentials
-python3 gbom_sync.py --config sync.example.yaml --dry-run        # list repos
-python3 gbom_sync.py --config sync.example.yaml                  # clone -> scan -> push
+# Public GitHub discovery needs no GitHub PAT; dry-run does not push to the platform
+python3 gbom_sync.py --config sync.example.yaml --dry-run
 
-# Fetch the source list from the platform (UI-managed), JSON logs for cron:
-python3 gbom_sync.py --config-url http://platform:8765/api/scanner/config --log-format json
+# Pushing with a local config to an auth-enabled platform needs a UI-minted
+# ingest token in a protected file
+SUPPLYDRIFT_RUNNER_TOKEN_FILE=/secure/path/supplydrift-ingest.token \
+  python3 gbom_sync.py --config sync.example.yaml
+
+# Fetch UI-managed sources from an auth-enabled platform. External runners need
+# a UI-minted runner-scope token in a protected file.
+SUPPLYDRIFT_RUNNER_TOKEN_FILE=/secure/path/supplydrift-runner.token \
+  python3 gbom_sync.py --config-url https://supplydrift.example/api/scanner/config --log-format json
 
 # Runner mode: long-running worker that executes scans the UI "Scan" button queues
-python3 gbom_sync.py --serve --config-url http://platform:8765/api/scanner/config
+SUPPLYDRIFT_RUNNER_TOKEN_FILE=/secure/path/supplydrift-runner.token \
+  python3 gbom_sync.py --serve --config-url https://supplydrift.example/api/scanner/config
 ```
 
-`result.json` is the normalized platform payload; `--report` emits `{target,
-components, vulnerabilities:[{id,severity,package,version,fix}], issues:[…phantom-deps]}`.
+The reference Compose runner already reads its generated token from the shared
+`/run/supplydrift/runner.token` volume and uses the private Compose network; no
+manual token export is needed there. The `--malware` option sends package PURLs,
+or fallback ecosystem/name/version coordinates, to OSV's `/v1/querybatch`
+service. OSV network failures are soft: the base scan still completes.
+
+Local output is always a JSON array, including for one repository. Each element
+of `result.json` is a normalized platform payload and can be submitted
+individually to `/api/ingest`; the array wrapper itself cannot. `--report` emits
+an array of flattened `{target, components,
+vulnerabilities:[{id,severity,package,version,fix}], issues:[…phantom-deps]}`
+objects for people and is not re-ingestable.
 
 | Flag | Description |
 |------|-------------|
@@ -408,20 +447,43 @@ components, vulnerabilities:[{id,severity,package,version,fix}], issues:[…phan
 | `--source NAME` | Only run the named source(s) (repeatable) |
 | `--dry-run` | List repositories only; do not clone/scan |
 | `--no-push` | Scan but do not POST to the platform |
-| `--format {summary,json}` | Result output style |
+| `--format {summary,json}` | Result output style in config-driven mode; local-target mode always writes JSON |
 | `-o, --output FILE` | Write the output to a file |
-| `--report` | Local mode: flattened `{target, components, vulnerabilities, issues}` JSON |
-| `--malware` | Local mode: also check scanned packages against OSV's malicious-package (`MAL-*`) feed |
+| `--report` | Local mode: array of flattened `{target, components, vulnerabilities, issues}` objects |
+| `--malware` | Local mode: submit package coordinates to OSV and add malicious-package (`MAL-*`) matches; network failures are soft |
 | `--serve` | Runner mode: poll the platform for queued github scan jobs and run them |
 | `--poll-interval SECONDS` | Runner mode: seconds between polls when the queue is empty (default 15) |
 | `--once` | Runner mode: process at most one job, then exit (for cron / tests) |
 | `-v, --verbose` / `-q, --quiet` | Log verbosity |
 | `--log-format {text,json}` | Progress log format |
 
-Auth is **optional** — omit it (or list explicit public `repositories`) to scan
-public repos anonymously; a classic PAT is needed only for private repos and is
-referenced by env-var name. Results POST to the platform's
-`POST /api/sync/repositories` — payload shape in
+There are two separate credentials:
+
+- **GitHub authentication is optional for public repositories.** A classic PAT
+  is needed for private repositories (and may help with API rate limits). Local
+  YAML references the PAT by environment-variable name, so the value stays in
+  the runner environment. UI-managed connectors store the submitted value in
+  encrypted platform secret storage and reveal it only in an authorized runner
+  configuration response.
+- **SupplyDrift authentication is on by default.** `--config-url` and `--serve`
+  require a `runner`-scope bearer token because the runner fetches decrypted
+  connector credentials, claims jobs, completes them, and ingests results. The
+  client resolves `SUPPLYDRIFT_RUNNER_TOKEN` first, then
+  `SUPPLYDRIFT_RUNNER_TOKEN_FILE` (default
+  `/run/supplydrift/runner.token`). A local config-file run that only pushes
+  results can use an `ingest`-scope token, but that token cannot fetch scanner
+  config or claim queue jobs.
+
+For a claimed job, the serve loop includes that job's `connector_id` in its
+config request. The response still contains the topology of all enabled
+connectors, but secret values are revealed only for the claimed connector and
+masked for the others. A direct `--config-url` run fetches all enabled connector
+configuration, even when `--source` later limits execution, and a runner token
+can deliberately omit or change connector scoping. Treat every runner token as
+globally authorized to retrieve stored connector secrets.
+
+Results POST to the platform's `POST /api/sync/repositories`; see the payload
+and authorization contract in
 [`platform/connector_contract.md`](../platform/connector_contract.md).
 
 ## How It Works
@@ -434,7 +496,7 @@ referenced by env-var name. Results POST to the platform's
 6. **AI Analysis (Phase 2.5, optional)** — With `--ai`, the LLM analyzes candidate snippets the regex layer flagged as ambiguous (or missed entirely), with sanitization, rate-limiting, and a 0.7 confidence floor.
 7. **Deep Lockfile Analysis (Phase 2.7, optional)** — With `--deep-lockfile`, parses lockfiles for transitive packages with install hooks.
 8. **Filtering (Phase 3)** — Applies ignore rules and severity overrides only from explicitly trusted configuration.
-9. **Dedup + Merge (Phase 3.5–4)** — Drops AI findings that overlap a regex hit (±1 line, same category); deduplicates by `(file, line, pattern_id)`.
+9. **Dedup + Merge (Phase 3.5–4)** — Drops AI findings that overlap a regex hit (±1 line, same category); deduplicates by `(file_path, line_number, pattern_id, extracted_dep)`.
 10. **Enrichment (Phase 5, optional)** — With `--ai --enrich`, batches findings by `extracted_dep` and asks the LLM for a summary, known supply-chain risks, and a fix recommendation.
 11. **Reporting** — Severity-sorted output in the requested format. AI/enrichment fields are emitted only when present, so consumers of the regex-only path see the same shape they always did.
 

@@ -6,17 +6,52 @@ The collector runs [Syft](https://github.com/anchore/syft), normalizes the usefu
 
 ## SupplyDrift Platform
 
-This collector integrates with the SupplyDrift platform out of the box — the platform's `POST /api/sync/endpoints` accepts the collector's native batch format (gzip + `Bearer` supported). Each device's scan becomes an `endpoint` asset with its packages as components, visible on the platform's **Endpoints** screen and searchable in the SBOM Analyzer for compromised-package response.
+This collector integrates with the SupplyDrift platform — the platform's
+`POST /api/sync/endpoints` accepts the collector's native package and
+vulnerability batches, including gzip request bodies. With the platform's
+default authentication enabled, every upload must carry a UI-minted `ingest`
+token (a `runner` token also has ingest capability). Each device's scan becomes
+an `endpoint` asset with its packages as components, visible on the platform's
+**Endpoints** screen and searchable in the SBOM Analyzer for
+compromised-package response.
 
-**Vulnerabilities.** When `SBOM_ENABLE_VULN_SCAN=true` (default) and `grype` is installed, the collector runs grype on the syft SBOM and uploads a **separate, tiny vulnerability batch** — just package name, version, purl, and the CVE id/severity/fix. The platform turns each into a CVE **finding** linked to the package, so device vulnerabilities show up on the **Vulnerabilities** and **Findings** screens without bloating the (already large) SBOM upload. Both streams map to the same endpoint asset.
+**Vulnerabilities.** When `SBOM_ENABLE_VULN_SCAN=true` (default) and `grype` is installed, the collector runs grype on the syft SBOM and uploads a **separate, tiny vulnerability batch** — just package name, version, purl, and the CVE id/severity/fix. The platform turns each into a CVE **finding** linked to the package, so device vulnerabilities show up on the global **Vulnerabilities** screen and the endpoint asset's **Vulnerabilities** tab without bloating the (already large) SBOM upload. Both streams map to the same endpoint asset.
 
-Just point the collector at the platform:
+Create an `ingest` token under **Access → API tokens**, store it in a protected
+file, and point the collector at the platform:
 
 ```bash
-./collect-sbom-inventory.sh --config ./sbom-inventory.supplydrift.env.example
+SBOM_SERVER_URL="https://supplydrift.example/api/sync/endpoints" \
+SBOM_AUTH_TOKEN_FILE="/etc/sbom-inventory/token" \
+./collect-sbom-inventory.sh
 ```
 
-The only required change versus a generic server is `SBOM_SERVER_URL="http://<platform>:8765/api/sync/endpoints"`. See [`sbom-inventory.supplydrift.env.example`](./sbom-inventory.supplydrift.env.example). Deploy it per-device via the launchd/systemd mechanism described in [docs/operations.md](docs/operations.md).
+For the repository's local Compose stack, put that ingest token in the root
+`.env` as `ENDPOINT_SCANNER_TOKEN`; `scripts/local-compose.sh endpoint` copies
+it into a temporary token file for the collector. Direct collector invocations
+use `SBOM_AUTH_TOKEN` or, preferably, `SBOM_AUTH_TOKEN_FILE`—the collector does
+not read `ENDPOINT_SCANNER_TOKEN` itself.
+
+[`sbom-inventory.supplydrift.env.example`](./sbom-inventory.supplydrift.env.example)
+is a checked-in template, not a runnable token-bearing config: its repository
+file mode is intentionally too open for the collector's strict permission
+checks. Copy it and create the token file in a private directory before editing
+either file:
+
+```bash
+install -d -m 700 "$HOME/.config/supplydrift"
+install -m 600 sbom-inventory.supplydrift.env.example \
+  "$HOME/.config/supplydrift/endpoint.env"
+install -m 600 /dev/null "$HOME/.config/supplydrift/endpoint.token"
+```
+
+Write the real UI-minted `ingest` token to `endpoint.token`, then edit the copied
+config so `SBOM_AUTH_TOKEN_FILE` points to that file. Keep the template's
+`SBOM_ALLOW_INSECURE=true` only for its loopback HTTP URL; use HTTPS and set it
+to `false` for every remote or production platform. Run the protected copy with
+`./collect-sbom-inventory.sh --config "$HOME/.config/supplydrift/endpoint.env"`.
+Deploy the final protected config and token per device using the launchd/systemd
+guidance in [docs/operations.md](docs/operations.md).
 
 ## Contents
 
@@ -55,6 +90,11 @@ It includes:
   packages, uploaded as separate small vulnerability batches
 
 It does not upload source code, file contents, shell history, environment variables, raw Syft JSON, file digests, Syft file listings, or CPEs.
+
+SupplyDrift currently stores the package/component and vulnerability portions
+of this payload. It does not yet persist the collector's `dependency_edges[]` or
+the complete per-occurrence detail; receivers implementing the complete generic
+contract may do so.
 
 ## Repository Layout
 
@@ -124,7 +164,9 @@ vulnerabilities:[…], malware:[…]}`; `--report` emits `{target, asset_type:
 vulnerabilities:[{id,severity,package,version,fix}], malware}`. Requires
 `syft`, `jq`, and (for CVEs) `grype` on PATH. The change gate never applies in
 `--output` mode — it always produces a complete inventory. The full upload mode
-below is the deployable setup.
+below is the deployable setup. `--malware` submits each package's PURL, or
+fallback ecosystem/name/version coordinates, to OSV's `/v1/querybatch` service;
+network failures are soft and do not prevent the base inventory from completing.
 
 Run the built-in smoke test:
 
@@ -225,15 +267,15 @@ Config files are plain KEY=VALUE Bash-sourced files — keep them declarative
 | `--verbose` | Adds syft/grype/sweep command lines, batch byte counts, and per-attempt HTTP codes. |
 | `--output FILE` | Local CLI mode: write one consolidated JSON (packages + CVEs), no server, no gate. |
 | `--report` | With `--output`: write a flattened human-friendly report instead of the upload payload. |
-| `--malware` | With `--output`: also check scanned packages against OSV's malicious-package (`MAL-*`) feed and add a `malware` array. |
+| `--malware` | With `--output`: submit package coordinates to OSV, add malicious-package (`MAL-*`) matches, and soft-fail lookup network errors. |
 | `-h`, `--help` | Usage text with every variable. |
 
 ### Core Variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SBOM_SERVER_URL` | none | Inventory server endpoint. Required unless dry-run. |
-| `SBOM_AUTH_TOKEN` | none | Bearer token for uploads. |
+| `SBOM_SERVER_URL` | none | Inventory server endpoint. Required in upload mode; not needed with `--dry-run` or `--output`. |
+| `SBOM_AUTH_TOKEN` | none | Bearer token for uploads. Required in upload mode; use an `ingest`-scope token for SupplyDrift. |
 | `SBOM_AUTH_TOKEN_FILE` | empty | File containing bearer token. Preferred for managed deployments. |
 | `SBOM_CONFIG_FILE` | empty | Optional Bash-style config file. |
 | `SBOM_DRY_RUN` | `false` | Print batch JSON instead of uploading. |
@@ -376,8 +418,10 @@ and unchanged runs carry no inventory).
 
 **Heartbeats.** When every root is unchanged, the collector uploads a single
 small JSON with `payload_type: "heartbeat"` referencing the last full scan per
-root, keeping endpoint liveness visible server-side. Heartbeats are
-best-effort: never queued, and a failed heartbeat does not fail the run.
+root. A receiver can use this as an endpoint-liveness signal. Heartbeats are
+best-effort: never queued, and a failed heartbeat does not fail the run. The
+current SupplyDrift adapter accepts the request but does not persist heartbeat
+liveness or update the endpoint asset from it.
 
 `SBOM_CHANGE_GATE=false` restores the previous always-scan behavior exactly.
 The gate state lives in `$SBOM_STATE_DIR/roots/<hash>/` as plain files; deleting
@@ -392,9 +436,9 @@ kinds share one endpoint URL, dispatched on `payload_type`: **SBOM batches**
 severity, fix}` records), and **heartbeats** (`payload_type: "heartbeat"` when
 every root is unchanged).
 
-Full payload examples, per-field tables, and the server-side contract
-(response codes, idempotent dedupe key, recommended indexes, inventory
-semantics) are in [docs/payload-contract.md](docs/payload-contract.md).
+Full payload examples, per-field tables, generic receiver recommendations, and
+the exact subset currently stored by SupplyDrift are in
+[docs/payload-contract.md](docs/payload-contract.md).
 
 ## Testing Against The Dummy Server
 
@@ -512,11 +556,28 @@ Recommended security posture:
 
 - use HTTPS for all production uploads
 - prefer token files over inline config tokens
-- use deployment-scoped or device-scoped tokens
+- issue separate `ingest` tokens per device or deployment when independent
+  revocation and audit are useful; tokens are capability-scoped and the
+  platform does not bind one to a claimed endpoint identity
 - rotate tokens periodically
 - keep `SBOM_STRICT_CONFIG_PERMS=true` (the default) so unsafe config/token perms are refused
 - store the config in a root-owned, non-group/world-writable directory (its parent dir is checked too)
 - restrict write access to the collector, config, token, state, and queue directories
+
+Optional analysis can also make outbound requests. `--malware` sends package
+PURLs or fallback coordinates to OSV. When vulnerability scanning is enabled,
+Grype's database auto-update is on by default and may download a newer database;
+set `SBOM_GRYPE_DB_AUTO_UPDATE=false` only when a current database is distributed
+through another trusted channel, such as on an air-gapped fleet.
+
+The host collector is **not** executed through `supplydrift-sandbox`/`nono`.
+Syft and Grype run directly as the collector's operating-system identity and
+can read every configured scan root that identity can access. `nice`, `ionice`,
+`taskpolicy`, timeouts, and battery/load gates limit resource impact; they are
+not security isolation. Run the scheduled service with the least privilege
+that still covers the intended roots, and protect the collector script,
+scanner binaries, `PATH`, config, token, state, queue, and temporary storage
+from untrusted modification or disclosure.
 
 Report vulnerabilities privately — see the repository
 [security policy](../SECURITY.md).
@@ -524,6 +585,7 @@ Report vulnerabilities privately — see the repository
 ## Known Limitations
 
 - Dependency kind is best-effort and depends on Syft cataloger evidence.
+- Unlike the containerized image and repository runners, this host collector does not sandbox Syft or Grype; their effective read access is the scheduled service account's read access.
 - Some ecosystems expose direct/transitive context better than others.
 - The Bash normalizer processes the Syft JSON document with `jq`; very large endpoints may require a future streaming helper.
 - The collector scans local filesystems only. It does not inspect remote registries unless relevant files exist on disk.
